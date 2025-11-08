@@ -23,6 +23,3 @@ members = [
     "compiler/litec_lower", 
     "compiler/litec_hir"
 ]
-
-[profile.release]
-debug = true
