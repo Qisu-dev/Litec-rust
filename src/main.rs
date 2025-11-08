@@ -1,247 +1,270 @@
-use std::io::{self, Write};
-use colored::Colorize;
-use litec_ast::token::TokenKind;
-use litec_parse::lexer::Lexer;
-use litec_parse::parser::Parser;
-use litec_span::GLOBAL_STRING_POOL;
-use litec_lower::Lower;
+// src/main.rs
 
-fn main() {
-    println!("Rust Parser REPL Demo");
-    println!("Enter source code (type ':quit' to exit, ':tokens' to show lexer results, ':hir' to show HIR, ':clear' to clear input):");
-    println!("You can paste multi-line code directly.");
+mod cli;
+
+use std::{path::PathBuf, process::Command};
+
+use anyhow::{anyhow, Context, Result};
+use cli::{Cli, Commands};
+use litec_codegen::{codegen, linker::Linker};
+use litec_lower::lower_crate;
+use litec_mir_lower::build_mir;
+use litec_parse::parser::parse;
+use litec_type_checker::check;
+
+fn main() -> Result<()> {
+    let cli = Cli::parse_args();
     
-    let mut multi_line_input = String::new();
-    let mut waiting_for_hir = false; // 新增：标记是否等待输入:hir
-
-    loop {
-        // Print prompt
-        if multi_line_input.is_empty() {
-            print!("> ");
-        } else {
-            print!(". ");
+    match cli.command {
+        Commands::Build { input, output, optimization, verbose } => {
+            build_command(input, output, optimization, verbose)
         }
-        io::stdout().flush().unwrap();
-        
-        // Read user input
-        let mut input_line = String::new();
-        match io::stdin().read_line(&mut input_line) {
-            Ok(0) => {
-                // EOF (Ctrl+D) encountered
-                if !multi_line_input.is_empty() {
-                    // Process any pending input
-                    parse_and_display(&multi_line_input);
-                    multi_line_input.clear();
-                }
-                println!("\nGoodbye!");
-                break;
-            }
-            Ok(_) => {
-                let input_line = input_line.trim_end();
-                
-                // Check for quit command
-                if input_line == ":quit" {
-                    println!("Goodbye!");
-                    break;
-                }
-                
-                // Check for clear command
-                if input_line == ":clear" {
-                    multi_line_input.clear();
-                    println!("Input cleared.");
-                    waiting_for_hir = false;
-                    continue;
-                }
-                
-                // Check for token display command
-                if input_line == ":tokens" {
-                    if !multi_line_input.is_empty() {
-                        println!("Current multi-line input will be used for lexical analysis.");
-                        show_tokens(&multi_line_input);
-                        waiting_for_hir = false;
-                    } else {
-                        println!("Please enter code for lexical analysis:");
-                        print!("> ");
-                        io::stdout().flush().unwrap();
-                        
-                        let mut code_input = String::new();
-                        if io::stdin().read_line(&mut code_input).is_ok() {
-                            let code_input = code_input.trim();
-                            if !code_input.is_empty() {
-                                show_tokens(code_input);
-                            }
-                        }
-                    }
-                    continue;
-                }
-                
-                // Check for HIR display command
-                if input_line == ":hir" {
-                    if !multi_line_input.is_empty() {
-                        println!("\nHIR Representation:");
-                        print_hir(&multi_line_input);
-                        multi_line_input.clear();
-                        waiting_for_hir = false;
-                    } else {
-                        println!("Please enter code first (or paste multi-line code).");
-                        println!("Type ':hir' after entering the code.");
-                        waiting_for_hir = true;
-                    }
-                    continue;
-                }
-                
-                // 如果正在等待:hir命令，直接添加到输入
-                if waiting_for_hir {
-                    // 添加输入到multi_line_input
-                    multi_line_input.push_str(input_line);
-                    multi_line_input.push('\n');
-                    continue;
-                }
-                
-                // Skip empty input unless we're in multi-line mode
-                if input_line.is_empty() {
-                    if !multi_line_input.is_empty() {
-                        // 不自动解析，等待用户输入命令
-                        println!("Please type ':hir' to show HIR or ':tokens' to show tokens.");
-                    }
-                    continue;
-                }
-                
-                // Add the current line to multi-line input
-                multi_line_input.push_str(input_line);
-                multi_line_input.push('\n');
-                
-                // 不再自动解析，等待用户输入命令
-                // if is_input_complete(&multi_line_input) { ... }
-            }
-            Err(error) => {
-                eprintln!("Error reading input: {}", error);
-                break;
-            }
+        Commands::Parse { input, ast } => {
+            parse_command(input, ast)
+        }
+        Commands::Mir { input, output } => {
+            mir_command(input, output)
+        }
+        Commands::Run { input, args } => {
+            run_command(input, args)
         }
     }
 }
 
-// 以下函数保持不变
-fn show_tokens(input: &str) {
-    println!("\nLexical Analysis Results:");
-    println!("{:<20} {:<15} {:<10} {}", "Kind", "Text", "Span", "Details");
-    println!("{}", "-".repeat(70));
-    
-    let mut lexer = Lexer::new(input);
-    let mut errors = Vec::new();
-    
-    loop {
-        match lexer.advance_token() {
-            Ok(token) => {
-                let kind_str = format!("{:?}", token.kind);
-                let text_str = if token.text.len() > 12 {
-                    format!("'{}...'", &token.text[..10])
-                } else {
-                    format!("'{}'", token.text)
-                };
-                let span_str = format!("{}..{}", token.span.start(), token.span.end());
-                
-                // Show details for literal tokens
-                let details = match &token.kind {
-                    TokenKind::Literal { kind, suffix } => {
-                        format!("Kind: {:?}, Suffix: {:?}", kind, suffix)
-                    }
-                    _ => String::new(),
-                };
-                
-                println!("{:<20} {:<15} {:<10} {}", kind_str, text_str, span_str, details);
-                
-                // Check if we've reached end of file
-                if matches!(token.kind, TokenKind::Eof) {
-                    break;
-                }
-            }
-            Err(error) => {
-                errors.push(error);
-                // Try to recover by skipping current character
-                lexer.advance(1);
-            }
-        }
+fn build_command(
+    input: std::path::PathBuf,
+    output: Option<std::path::PathBuf>,
+    optimization: u8,
+    verbose: bool,
+) -> Result<()> {
+    if verbose {
+        println!("🔨 构建模式");
+        println!("📄 输入文件: {:?}", input);
+        println!("🎯 输出文件: {:?}", output);
+        println!("⚡ 优化级别: {}", optimization);
     }
     
-    // Show errors
-    if !errors.is_empty() {
-        println!("\nLexical Errors:");
-        for error in &errors {
-            println!("  {}", error);
-        }
+    let source_code = std::fs::read_to_string(&input)
+        .with_context(|| format!("无法读取文件: {:?}", input))?;
+    
+    // 调用你的编译器
+    compile_source(&source_code, optimization, verbose)?;
+    
+    if verbose {
+        println!("✅ 构建完成!");
     }
     
-    println!(); // Empty line separator
+    Ok(())
 }
 
-fn parse_and_display(input: &str) {
-    // Create parser
-    let mut parser = Parser::new(input);
+fn parse_command(input: std::path::PathBuf, ast: bool) -> Result<()> {
+    println!("🔍 解析模式: {:?}", input);
     
-    let result = parser.parse();
-
-    // Parse input
-    match result {
-        Ok(ast) => {            
-            println!("{}", format!("{:#?}", ast).cyan());
-            println!("{}", GLOBAL_STRING_POOL.to_string());
-        }
-        Err(errors) => {
-            println!("Parse failed");
-            
-            for error in errors {
-                // Extract the relevant part of the source for error reporting
-                let span = error.span();
-                let source_snippet = if span.start() < input.len() && span.end() <= input.len() {
-                    let start = span.start().saturating_sub(10);
-                    let end = std::cmp::min(span.end() + 10, input.len());
-                    format!("{}", &input[start..end])
-                } else {
-                    "unknown location".to_string()
-                };
-                
-                println!("{}", format!("    {} Near: '{}'", error, source_snippet).red());
-            }
-        }
+    let source_code = std::fs::read_to_string(&input)
+        .with_context(|| format!("无法读取文件: {:?}", input))?;
+    
+    // 调用你的解析器
+    if ast {
+        println!("🌳 显示 AST");
+        // 显示抽象语法树
     }
     
-    println!(); // Empty line separator
+    println!("✅ 解析完成");
+    Ok(())
 }
 
-// 新增：打印HIR的函数
-fn print_hir(input: &str) {
-    // 解析为AST
-    let mut parser = Parser::new(input);
-    let ast = match parser.parse() {
-        Ok(ast) => ast,
-        Err(errors) => {
-            eprintln!("Parsing failed for HIR:");
-            for error in errors {
-                eprintln!("  {}", error);
+fn mir_command(input: std::path::PathBuf, output: Option<std::path::PathBuf>) -> Result<()> {
+    println!("🔄 MIR 生成模式: {:?}", input);
+    
+    let source_code = std::fs::read_to_string(&input)
+        .with_context(|| format!("无法读取文件: {:?}", input))?;
+    
+    // 调用你的 MIR 生成器
+    if let Some(output_path) = output {
+        println!("💾 输出到: {:?}", output_path);
+    }
+    
+    println!("✅ MIR 生成完成");
+    Ok(())
+}
+
+fn run_command(input: PathBuf, args: Vec<String>) -> Result<()> {
+    println!("🏃 运行模式: {:?}", input);
+    println!("📝 程序参数: {:?}", args);
+    
+    // 读取源代码
+    let source_code = std::fs::read_to_string(&input)
+        .with_context(|| format!("无法读取文件: {:?}", input))?;
+    
+    println!("📖 源代码长度: {} 字符", source_code.len());
+    
+    // 解析阶段
+    let ast = match parse(&source_code) {
+        Ok(ast) => {
+            println!("✅ 语法分析成功");
+            ast
+        },
+        Err(errs) => {
+            eprintln!("❌ 语法分析失败，错误数: {}", errs.len());
+            for err in errs {
+                eprintln!("   {}", err);
             }
-            return;
+            return Err(anyhow!("语法分析失败"));
         }
     };
 
-    let mut lower = Lower::new();
-    // 将AST转换为HIR
-    let hir = match lower.lower_crate(ast) {
-        Ok(hir) => hir,
-        Err(errors) => {
-            eprintln!("Lowering failed:");
-            for error in errors {
-                eprintln!("  {}", error);
+    // HIR 转换
+    let hir = match lower_crate(ast) {
+        Ok(hir) => {
+            println!("✅ HIR转换成功");
+            hir
+        },
+        Err(errs) => {
+            eprintln!("❌ HIR转换失败，错误数: {}", errs.len());
+            for err in errs {
+                eprintln!("   {}", err);
             }
-            return;
+            return Err(anyhow!("HIR转换失败"));
         }
     };
 
-    // 打印HIR
-    println!("{}", format!("{:#?}", hir).cyan());
+    // 类型检查
+    let typed_hir = match check(hir, input.clone()) {
+        Ok(typed_hir) => {
+            println!("✅ 类型检查成功");
+            typed_hir
+        },
+        Err(errs) => {
+            eprintln!("❌ 类型检查失败，错误数: {}", errs.len());
+            for err in errs {
+                eprintln!("   {}", err);
+            }
+            return Err(anyhow!("类型检查失败"));
+        },
+    };
+
+    // 生成 MIR
+    let mir = build_mir(&typed_hir);
+    println!("📋 生成 MIR，包含 {} 个函数", mir.len());
+
+    // 生成目标文件路径
+    let object_file = input.with_extension(if cfg!(windows) { "obj" } else { "o" });
     
-    // 打印字符串池（可选）
-    println!("\nString Pool:");
-    println!("{}", GLOBAL_STRING_POOL.to_string());
+    // 代码生成 - 编译到目标文件
+    let executable_data = match codegen(mir, input.file_name().unwrap().to_str().unwrap()) {
+        Ok(executable) => {
+            println!("✅ 代码生成成功，生成 {} 字节目标文件", executable.len());
+            executable
+        },
+        Err(e) => {
+            eprintln!("❌ 代码生成失败: {}", e);
+            return Err(anyhow!("代码生成失败: {}", e));
+        }
+    };
+
+    // 写入目标文件
+    std::fs::write(&object_file, &executable_data)
+        .with_context(|| format!("无法写入目标文件: {:?}", object_file))?;
+    println!("💾 目标文件已写入: {:?}", object_file);
+
+    // 使用您现有的链接器链接可执行文件
+    let output_exe = input.with_extension(if cfg!(windows) { "exe" } else { "" });
+    
+    println!("🔗 开始链接过程...");
+    let linker = Linker::new()
+        .with_context(|| "无法初始化链接器")?;
+    
+    linker.link_executable(&object_file, &output_exe)
+        .with_context(|| format!("链接失败: {:?} -> {:?}", object_file, output_exe))?;
+    
+    println!("✅ 链接成功: {:?}", output_exe);
+
+    // 清理临时文件
+    if let Err(e) = std::fs::remove_file(&object_file) {
+        println!("⚠️  无法删除临时文件 {:?}: {}", object_file, e);
+    } else {
+        println!("🧹 已清理临时文件: {:?}", object_file);
+    }
+
+    // 检查文件大小
+    if let Ok(metadata) = std::fs::metadata(&output_exe) {
+        println!("📦 可执行文件大小: {} 字节", metadata.len());
+    }
+
+    // 如果用户提供了 --run 参数，自动运行程序
+    let should_run = args.iter().any(|arg| arg == "--run") || args.is_empty();
+    
+    if should_run {
+        println!("🚀 自动运行程序...");
+        run_executable(&output_exe, &args)?;
+    } else {
+        println!("💾 可执行文件已生成: {:?}", output_exe);
+        println!("🎉 编译完成");
+    }
+    
+    Ok(())
+}
+
+/// 运行生成的可执行文件
+fn run_executable(executable_path: &PathBuf, original_args: &[String]) -> Result<()> {
+    // 过滤掉 --run 参数
+    let run_args: Vec<&String> = original_args
+        .iter()
+        .filter(|arg| arg != &&"--run".to_string())
+        .collect();
+    
+    println!("▶️  执行: {:?} {:?}", executable_path, run_args);
+    
+    let status = Command::new(executable_path)
+        .args(run_args)
+        .status()
+        .with_context(|| format!("无法执行程序: {:?}", executable_path))?;
+    
+    if status.success() {
+        println!("✅ 程序执行成功");
+    } else {
+        println!("⚠️  程序退出状态: {}", status);
+    }
+    
+    Ok(())
+}
+
+// 如果您需要处理特定的链接错误，可以添加这个辅助函数
+fn handle_linker_error(error: &anyhow::Error) {
+    eprintln!("❌ 链接器错误: {}", error);
+    
+    // 提供有用的调试信息
+    #[cfg(target_os = "windows")]
+    eprintln!(
+        "💡 Windows 链接提示:\n\
+         - 确保安装了 Visual Studio Build Tools 或 LLVM\n\
+         - 或者安装 MinGW-w64\n\
+         - 检查链接器是否在 PATH 环境变量中"
+    );
+    
+    #[cfg(target_os = "linux")]
+    eprintln!(
+        "💡 Linux 链接提示:\n\
+         - 安装 gcc: sudo apt install gcc\n\
+         - 或者安装 clang: sudo apt install clang\n\
+         - 检查开发工具链是否完整"
+    );
+    
+    #[cfg(target_os = "macos")]
+    eprintln!(
+        "💡 macOS 链接提示:\n\
+         - 安装 Xcode Command Line Tools: xcode-select --install\n\
+         - 或者安装 Homebrew 的 llvm: brew install llvm"
+    );
+}
+
+fn compile_source(source_code: &str, optimization: u8, verbose: bool) -> Result<()> {
+    if verbose {
+        println!("📋 编译源代码 (长度: {})", source_code.len());
+    }
+    
+    // 这里集成你现有的编译器逻辑
+    // 使用你之前实现的各个组件
+    
+    Ok(())
 }

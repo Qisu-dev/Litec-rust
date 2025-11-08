@@ -1,11 +1,12 @@
 [package]
-name = "litec_hir"
+name = "litec_mir"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rustc-hash = "2.1.1"
 litec_span = { path = "../litec_span" }
-litec_ast = { path = "../litec_ast" }
+litec_typed_hir = { path = "../litec_typed_hir" }
+
+rustc-hash = "2.1.1"
 
 [lib]

@@ -1,10 +1,17 @@
 use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
+    cell::RefCell, ops::Range, path::Path, rc::Rc, sync::Once
 };
+
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StringId(pub usize);
+
+impl From::<&str> for StringId {
+    fn from(value: &str) -> Self {
+        intern_global(value)
+    }
+}
 
 impl std::fmt::Display for StringId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -13,116 +20,144 @@ impl std::fmt::Display for StringId {
 }
 
 #[derive(Debug, Default)]
-struct StringPoolInner {
-    strings: Vec<Arc<str>>,
-    index_map: HashMap<Arc<str>, StringId>,
-}
-
-#[derive(Debug, Default)]
 pub struct StringPool {
-    inner: RwLock<StringPoolInner>,
+    pub strings: RefCell<Vec<Rc<str>>>,
+    pub index_map: RefCell<FxHashMap<Rc<str>, StringId>>,
 }
 
 impl StringPool {
     /// 创建新的空字符串池
     pub fn new() -> Self {
         Self {
-            inner: RwLock::new(StringPoolInner::default()),
+            strings: Default::default(),
+            index_map: Default::default()
         }
     }
     
     /// 添加字符串到池中，返回其ID
     /// 如果字符串已存在，返回现有ID
+    #[inline]
     pub fn intern(&self, s: &str) -> StringId {
-        let mut inner = self.inner.write().unwrap();
-        
+        let s = Rc::from(s);
         // 检查是否已存在
-        if let Some(&id) = inner.index_map.get(s) {
+        if let Some(&id) = self.index_map.borrow().get(&s) {
             return id;
         }
         
         // 创建新条目
-        let id = StringId(inner.strings.len());
-        let arc_str: Arc<str> = Arc::from(s);
-        inner.index_map.insert(arc_str.clone(), id);
-        inner.strings.push(arc_str);
+        let id = StringId(self.strings.borrow().len());
+        self.index_map.borrow_mut().insert(s.clone(), id);
+        self.strings.borrow_mut().push(s);
         id
     }
     
     /// 根据ID获取字符串的只读引用
-    pub fn get(&self, id: StringId) -> Option<Arc<str>> {
-        let inner = self.inner.read().unwrap();
-        inner.strings.get(id.0).cloned()
+    #[inline]
+    pub fn get(&self, id: StringId) -> Option<Rc<str>> {
+        self.strings.borrow().get(id.0).map(|v| v).cloned()
     }
     
     /// 检查字符串是否已在池中
+    #[inline]
     pub fn contains(&self, s: &str) -> bool {
-        let inner = self.inner.read().unwrap();
-        inner.index_map.contains_key(s)
+        self.index_map.borrow().contains_key(s)
     }
     
     /// 获取池中字符串数量
+    #[inline]
     pub fn len(&self) -> usize {
-        let inner = self.inner.read().unwrap();
-        inner.strings.len()
+        self.strings.borrow().len()
     }
     
     /// 检查池是否为空
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
-    pub fn to_string(&self) -> String {
-        let inner = self.inner.read().unwrap();
-        format!("{:#?}", inner)
-    }
 }
 
 // 全局字符串池
-pub static GLOBAL_STRING_POOL: once_cell::sync::Lazy<StringPool> =
-    once_cell::sync::Lazy::new(StringPool::new);
 
-/// 全局字符串插入函数
+static INIT: Once = Once::new();
+static mut GLOBAL_STRING_POOL: *mut StringPool = std::ptr::null_mut();
+
+#[inline]
+pub fn get_global_string_pool() -> &'static mut StringPool {
+    unsafe {
+        INIT.call_once(|| {
+            let boxed = Box::new(StringPool::default());
+            GLOBAL_STRING_POOL = Box::into_raw(boxed);
+        });
+        &mut *GLOBAL_STRING_POOL
+    }
+}
+
+#[inline]
 pub fn intern_global(s: &str) -> StringId {
-    GLOBAL_STRING_POOL.intern(s)
+    get_global_string_pool().intern(s)
 }
 
-/// 全局字符串查询函数
-pub fn get_global_string(id: StringId) -> Option<Arc<str>> {
-    GLOBAL_STRING_POOL.get(id)
+#[inline]
+pub fn get_global_string(id: StringId) -> Option<Rc<str>> {
+    get_global_string_pool().get(id)
 }
 
-/// 检查全局字符串池是否包含某字符串
+#[inline]
 pub fn contains_global(s: &str) -> bool {
-    GLOBAL_STRING_POOL.contains(s)
+    get_global_string_pool().contains(s)
 }
 
-/// 获取全局字符串池的大小
+#[inline]
 pub fn global_pool_len() -> usize {
-    GLOBAL_STRING_POOL.len()
+    get_global_string_pool().len()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+// 在 litec_span 中确保 Span 包含行列信息
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
-    start: usize,
-    end: usize,
+    pub start: Location,
+    pub end: Location,
+    pub file: FileId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Location {
+    pub line: usize,
+    pub column: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LineCol {
+    pub line: usize,   // 0-based
+    pub column: usize, // 0-based（字符索引）
+}
+
+impl Default for Span {
+    fn default() -> Self {
+        Self {
+            start: Location { line: 0, column: 0, offset: 0 },
+            end: Location { line: 0, column: 0, offset: 0 },
+            file: FileId(0),
+        }
+    }
 }
 
 impl Span {
-    pub fn new(start: usize, end: usize) -> Self {
-        Self { start, end }
+    pub fn new(start: Location, end: Location, file_id: FileId) -> Self {
+        assert!(start <= end, "Span start must <= end");
+        Self { start, end, file: file_id }
     }
     
-    pub fn start(&self) -> usize {
+    pub fn start(&self) -> Location {
         self.start
     }
 
-    pub fn end(&self) -> usize {
+    pub fn end(&self) -> Location {
         self.end
     }
     
     pub fn len(&self) -> usize {
-        self.end - self.start
+        self.end.offset - self.start.offset
     }
     
     pub fn is_empty(&self) -> bool {
@@ -130,73 +165,151 @@ impl Span {
     }
     
     pub fn extend_to(&self, other: Span) -> Self {
-        let start = self.start.min(other.start);
-        let end = self.end.max(other.end);
-        Self::new(start, end)
-    }
-    
-    pub fn contains(&self, pos: usize) -> bool {
-        self.start <= pos && pos < self.end
-    }
-    
-    pub fn overlaps(&self, other: Span) -> bool {
-        self.start < other.end && other.start < self.end
-    }
-    
-    pub fn merge(&self, other: Span) -> Option<Self> {
-        if self.overlaps(other) || self.end == other.start || other.end == self.start {
-            Some(self.extend_to(other))
+        assert!(self.file == other.file);
+        let start = if self.start.offset > other.start.offset {
+            self.start
         } else {
-            None
-        }
-    }
-    
-    pub fn extract<'a>(&self, source: &'a str) -> Option<&'a str> {
-        if self.end <= source.len() {
-            Some(&source[self.start..self.end])
+            other.start
+        };
+        let end = if self.end.offset > other.end.offset {
+            self.end
         } else {
-            None
-        }
+            other.end
+        };
+        Self::new(start, end, self.file)
     }
 }
 
 #[derive(Debug)]
-pub struct SourceFile<'src> {
-    pub name: &'src str,
-    pub source: &'src str,
+pub struct SourceFile {
+    pub name: String,
+    pub source:  String,
+    pub path: Box<Path>,
+    pub line_breaks: Vec<usize>,
 }
 
-impl<'src> SourceFile<'src> {
-    pub fn new(name: &'src str, source: &'src str) -> Self {
-        Self {
-            name: name,
-            source: source
+impl SourceFile {
+    pub fn new(name: String, src: String, path: &Path) -> Self {
+        let mut breaks = vec![0];
+        for (i, &b) in src.as_bytes().iter().enumerate() {
+            if b == b'\n' {
+                breaks.push(i + 1);
+            }
         }
+        if breaks.last() != Some(&src.len()) {
+            breaks.push(src.len());
+        }
+        Self { name, source: src, path: path.into(), line_breaks: breaks }
+    }
+
+    pub fn len(&self) -> usize {
+        self.source.len()
+    }
+
+    /// 字节偏移 → LineCol
+    pub fn offset_to_linecol(&self, offset: usize) -> LineCol {
+        let line = match self.line_breaks.binary_search(&offset) {
+            Ok(l)  => l,
+            Err(l) => l.saturating_sub(1),
+        };
+        let col = offset - self.line_breaks[line];
+        LineCol { line, column: col }
+    }
+
+    pub fn location_from_offset(&self, offset: usize) -> Location {
+        let line_col = self.offset_to_linecol(offset);
+        Location { 
+            line: line_col.line, 
+            column: line_col.column, 
+            offset: offset 
+        }
+    }
+
+    /// 一次返回 (start, end) 的 LineCol
+    #[inline]
+    pub fn line_col_range(&self, start_offset: usize, end_offset: usize) -> (LineCol, LineCol) {
+        (
+            self.offset_to_linecol(start_offset),
+            self.offset_to_linecol(end_offset),
+        )
+    }
+
+    /// 取第 line 行文本（不带换行符）
+    pub fn line_text(&self, line: usize) -> &str {
+        let start = self.line_breaks[line];
+        let end   = self.line_breaks[line + 1];
+        &self.source[start..end].trim_end_matches(&['\r', '\n'][..])
+    }
+
+    /// 获取指定行的字节范围
+    pub fn line_range(&self, line: usize) -> Range<usize> {
+        let start = self.line_breaks[line];
+        let end = if line + 1 < self.line_breaks.len() {
+            self.line_breaks[line + 1]
+        } else {
+            self.source.len()
+        };
+        start..end
+    }
+
+    pub fn get_text_from_span(&self, span: Span) -> &str {
+        &self.source[span.start.offset..span.end.offset]
+    }
+
+    /// 获取源文件文本
+    pub fn source_text(&self) -> &str {
+        &self.source
     }
 }
 
-#[derive(Debug)]
-pub struct SourceMap<'a> {
-    sources: Vec<SourceFile<'a>>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FileId(pub usize);
+
+#[derive(Debug, Default)]
+pub struct SourceMap {
+    files: Vec<SourceFile>,
 }
 
-impl<'a> SourceMap<'a> {
+impl SourceMap {
     pub fn new() -> Self {
         Self {
-            sources: Vec::new()
+            files: Vec::new()
+        }
+    }
+    /// 加文件，返回 FileId
+    pub fn add_file(&mut self, name: String, src: String, path: &Path) -> FileId {
+        let id = FileId(self.files.len());
+        self.files.push(SourceFile::new(name, src, path));
+        id
+    }
+
+    /// 取文件
+    pub fn file(&self, id: FileId) -> Option<&SourceFile> {
+        if id.0 >= self.files.len() {
+            None
+        } else {
+            Some(&self.files[id.0])
         }
     }
 
-    pub fn add_file(&mut self, source_file: SourceFile<'a>) -> usize {
-        let len = self.sources.len();
-        self.sources.push(source_file);
-        len
+    /// 返回 (start_lc, end_lc)
+    pub fn line_col(&self, span: Span) -> (LineCol, LineCol) {
+        let f = self.file(span.file);
+        f.unwrap().line_col_range(span.start.offset, span.end.offset)
     }
 
-    pub fn get_file(&self, id: usize) -> Option<&SourceFile<'a>> {
-        self.sources.get(id)
+    /// 取一行文本
+    pub fn line_text(&self, file: FileId, line: usize) -> &str {
+        self.file(file).unwrap().line_text(line)
+    }
+
+    /// 获取源文件文本
+    pub fn source_text(&self, file_id: FileId) -> &str {
+        &self.files[file_id.0].source
+    }
+
+    /// 获取指定行的字节范围
+    pub fn line_range(&self, file_id: FileId, line: usize) -> Range<usize> {
+        self.files[file_id.0].line_range(line)
     }
 }
-
-#[cfg(test)]
-mod tests;

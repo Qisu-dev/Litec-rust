@@ -1,0 +1,16 @@
+[package]
+name = "litec_name_resolver"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+litec_hir = { path = "../litec_hir" }
+litec_typed_hir = { path = "../litec_typed_hir" }
+litec_span = { path = "../litec_span" }
+litec_parse = { path = "../litec_parse" }
+litec_lower = { path = "../litec_lower" }
+litec_error = { path = "../litec_error" }
+
+rustc-hash = "2.1.1"
+
+[lib]

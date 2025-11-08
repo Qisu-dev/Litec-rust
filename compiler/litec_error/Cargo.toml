@@ -1,10 +1,10 @@
 [package]
-name = "litec_hir"
+name = "litec_error"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rustc-hash = "2.1.1"
+annotate-snippets = "0.12.5"
 litec_span = { path = "../litec_span" }
 litec_ast = { path = "../litec_ast" }
 

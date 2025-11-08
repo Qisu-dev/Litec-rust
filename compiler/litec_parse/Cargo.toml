@@ -8,8 +8,8 @@ edition = "2024"
 [dependencies]
 litec_ast = { path = "../litec_ast" }
 litec_span = { path = "../litec_span" }
-litec_errors = { path = "../litec_errors" }
-unicode-xid = "0.2.0"
+litec_error = { path = "../litec_error" }
+unicode-xid = "0.2.6"
 
 [dependencies.unicode-properties]
 version = "0.1.3"

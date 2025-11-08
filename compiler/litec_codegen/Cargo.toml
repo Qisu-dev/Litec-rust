@@ -1,0 +1,15 @@
+[package]
+name = "litec_codegen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+litec_mir = { path = "../litec_mir" }
+litec_typed_hir = { path = "../litec_typed_hir" }
+litec_span = { path = "../litec_span" }
+inkwell = { version = "0.6.0", features = ["llvm18-1"] }
+
+anyhow = "1.0.100"
+rustc-hash = "2.1.1"
+
+[lib]

@@ -15,17 +15,10 @@ impl<'src> Token<'src> {
             text: text
         }
     }
-
-    pub fn text<'a>(&self, source: &'a str) -> &'a str {
-        &source[self.span.start()..self.span.end()-1]
-    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
-    LineComment,
-    BlockComment,
-
     Ident,
 
     Literal {
@@ -56,7 +49,7 @@ pub enum TokenKind {
     /// `@`
     At,
     /// `#`
-    Pound,
+    Hash,
     /// `~`
     Tilde,
     /// `?`
@@ -112,13 +105,15 @@ pub enum TokenKind {
     /// `^`
     Caret,
     /// `%`
-    Percent,
+    Remainder,
     /// `%=`
-    PercentEq,
+    RemainderEq,
     /// `->`
     Arrow,
     /// `=>`
     FatArrow,
+    /// `..`
+    To,
 
     // Keyword
     Fn,
@@ -137,6 +132,10 @@ pub enum TokenKind {
     Continue,
     Pub,
     Priv,
+    Use,
+    As,
+    Extern,
+    Mut,
 
     Error,
     Eof,
