@@ -395,19 +395,19 @@ impl<'a> Builder<'a> {
 
     fn build_literal(&self, value: &LiteralValue, span: Span) -> Operand {
         match value {
-            LiteralValue::Int { value, kind } => {
-                        match kind {
-                            litec_hir::LitIntValue::I8 => Operand::Literal(Literal::I8(*value as i8)),
-                            litec_hir::LitIntValue::I16 => Operand::Literal(Literal::I16(*value as i16)),
-                            litec_hir::LitIntValue::I32 => Operand::Literal(Literal::I32(*value as i32)),
-                            litec_hir::LitIntValue::I64 => Operand::Literal(Literal::I64(*value as i64)),
-                            litec_hir::LitIntValue::I128 => Operand::Literal(Literal::I128(*value as i128)),
-                            litec_hir::LitIntValue::Isize => Operand::Literal(Literal::Isize(*value as isize)),
-                            litec_hir::LitIntValue::U8 => Operand::Literal(Literal::U8(*value as u8)),
-                            litec_hir::LitIntValue::U16 => Operand::Literal(Literal::U16(*value as u16)),
-                            litec_hir::LitIntValue::U32 => Operand::Literal(Literal::U32(*value as u32)),
-                            litec_hir::LitIntValue::U64 => Operand::Literal(Literal::U64(*value as u64)),
-                            litec_hir::LitIntValue::U128 => Operand::Literal(Literal::U128(*value as u128)),
+            LiteralValue::Int { value } => {
+                        match value {
+                            litec_hir::LitIntValue::I8(value) => Operand::Literal(Literal::I8(*value)),
+                            litec_hir::LitIntValue::I16(value) => Operand::Literal(Literal::I16(*value)),
+                            litec_hir::LitIntValue::I32(value) => Operand::Literal(Literal::I32(*value)),
+                            litec_hir::LitIntValue::I64(value) => Operand::Literal(Literal::I64(*value)),
+                            litec_hir::LitIntValue::I128(value) => Operand::Literal(Literal::I128(*value)),
+                            litec_hir::LitIntValue::Isize(value) => Operand::Literal(Literal::Isize(*value)),
+                            litec_hir::LitIntValue::U8(value) => Operand::Literal(Literal::U8(*value)),
+                            litec_hir::LitIntValue::U16(value) => Operand::Literal(Literal::U16(*value)),
+                            litec_hir::LitIntValue::U32(value) => Operand::Literal(Literal::U32(*value)),
+                            litec_hir::LitIntValue::U64(value) => Operand::Literal(Literal::U64(*value)),
+                            litec_hir::LitIntValue::U128(value) => Operand::Literal(Literal::U128(*value)),
                             litec_hir::LitIntValue::Usize => Operand::Literal(Literal::Usize(*value as usize)),
                             litec_hir::LitIntValue::Unknown => unreachable!(),
                         }

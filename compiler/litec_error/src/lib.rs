@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use annotate_snippets::{renderer::{DecorStyle, Style}, AnnotationKind, Group, Level, Renderer, Snippet};
+use annotate_snippets::{renderer::DecorStyle, AnnotationKind, Group, Level, Renderer, Snippet};
 use litec_span::{SourceMap, Span};
 
 #[derive(Debug, Clone)]
@@ -266,8 +266,6 @@ pub fn warning(message: impl Into<String>) -> DiagnosticBuilder {
 
 // 国际化支持 - 预留接口
 pub mod messages {
-    use std::fmt::format;
-
     // 目前先用中文，后续可以替换为国际化键值
     pub const UNTERMINATED_CHAR: &str = "未终止的字符字面量";
     pub const UNTERMINATED_STRING: &str = "未终止的字符串字面量";

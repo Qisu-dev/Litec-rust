@@ -59,7 +59,7 @@ pub enum TokenKind {
     /// `$`
     Dollar,
     /// `=`
-    Eq,
+    Assign,
     /// `==`
     EqEq,
     /// `!=`
@@ -69,11 +69,11 @@ pub enum TokenKind {
     /// `<`
     Lt,
     /// `<=`
-    LtEq,
+    Le,
     /// `>`
     Gt,
     /// `>=`
-    GtEq,
+    Ge,
     /// `-`
     Minus,
     /// `--`
@@ -89,21 +89,21 @@ pub enum TokenKind {
     /// `||`
     Or,
     /// `+`
-    Plus,
+    Add,
     /// `++`
     PlusPlus,
     /// `+=`
     PlusEq,
     /// `*`
-    Star,
+    Mul,
     /// `*=`
-    StarEq,
+    MulEq,
     /// `/`
-    Slash,
+    Div,
     /// `/=`
-    SlashEq,
+    DivEq,
     /// `^`
-    Caret,
+    BitXor,
     /// `%`
     Remainder,
     /// `%=`
@@ -114,6 +114,12 @@ pub enum TokenKind {
     FatArrow,
     /// `..`
     To,
+    /// `..`
+    ToEq,
+    /// `<<`
+    Shl,
+    /// `>>`
+    Shr,
 
     // Keyword
     Fn,
@@ -136,6 +142,7 @@ pub enum TokenKind {
     As,
     Extern,
     Mut,
+    Const,
 
     Error,
     Eof,

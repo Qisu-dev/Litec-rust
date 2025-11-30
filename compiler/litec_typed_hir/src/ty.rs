@@ -12,7 +12,7 @@ pub enum Ty {
     Ptr(Box<Ty>),
     Ref {
         mutable: bool,
-        to: Arc<Ty>,
+        to: Box<Ty>,
     },
     Array {
         elem: Arc<Ty>,
@@ -36,6 +36,7 @@ pub enum IntKind {
     I8, I16, I32, I64, I128, Isize,
     U8, U16, U32, U64, U128, Usize,
 }
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FloatKind {
     Unknow,

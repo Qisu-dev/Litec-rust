@@ -7,3 +7,4 @@ edition = "2024"
 
 [dependencies]
 litec_span = { path = "../litec_span" }
+rustc-hash = "2.1.1"

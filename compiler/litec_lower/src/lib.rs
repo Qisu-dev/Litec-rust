@@ -1,811 +1,1222 @@
-use litec_ast::{ast::{
-    Block as AstBlock, Crate as AstCrate, Expr as AstExpr, Field as AstField, Item as AstItem, Param as AstParam, 
-    Stmt as AstStmt, TypeAnnotation, UseItem, Visibility as AstVisibility, Attribute as AstAttribute
-}, token::{LiteralKind, TokenKind}};
-use litec_hir::{
-    Block as HirBlock, Crate as HirCrate, Expr as HirExpr, Field as HirField, LitFloatValue, LitIntValue, 
-    Item as HirItem, LiteralValue, Param as HirParam, Stmt as HirStmt, Attribute as HirAttribute,
-    Type as HirType, Visibility as HirVisibility, UseItem as HirUseItem
+use litec_ast::{
+    ast::{
+        Attribute as AstAttribute, AttributeKind as AstAttributeKind, Block as AstBlock, Crate as AstCrate, 
+        Expr as AstExpr, ExternItem, Field as AstField, Item as AstItem, Param as AstParam, Stmt as AstStmt, 
+        Type, UseItem, Visibility as AstVisibility, ExternItem as AstExternItem
+    }, 
+    token::{
+        Base, LiteralKind
+    }
 };
-use litec_error::{Diagnostic, DiagnosticBuilder, error};
+use litec_hir::{
+    AssignOp, Attribute as HirAttribute, AttributeKind as HirAttributeKind, BinOp, Block as HirBlock, 
+    Crate as HirCrate, Expr as HirExpr, Field as HirField, Item as HirItem, LitFloatValue, LitIntValue, 
+    LiteralValue, Mutability as HirMutability, Param as HirParam, PosOp, Stmt as HirStmt, Type as HirType, 
+    UnOp, UseItem as HirUseItem, Visibility as HirVisibility, AbiType as HirAbiType, ExternItem as HirExternItem
+};
+use litec_error::{Diagnostic, error};
 use litec_span::{Span, StringId, get_global_string, intern_global};
+use rustc_hash::FxHashMap;
 
-type LowerResult<T> = Result<T, Diagnostic>;
+pub struct Lower {
+    pub krate: AstCrate,
+    pub diagnostics: Vec<Diagnostic>
+}
 
-pub fn lower_crate(ast: AstCrate) -> Result<HirCrate, Vec<Diagnostic>> {
-    let mut errors = Vec::new();
-    let mut items = Vec::new();
-    for item in ast.items {
-        match lower_item(item) {
-            Ok(item) => items.push(item),
-            Err(err) => errors.push(err),
+impl Lower {
+    pub fn new(krate: AstCrate) -> Self {
+        Self {
+            krate: krate,
+            diagnostics: Vec::new()
         }
     }
-    if errors.is_empty() {
-        Ok(HirCrate {items: items})
-    } else {
-        Err(errors)
+
+    pub fn low(&mut self) -> (HirCrate, Vec<Diagnostic>) {
+        let krate_items = std::mem::take(&mut self.krate.items);
+        let mut items = Vec::new();
+        for item in krate_items.into_iter() {
+            match self.low_item(item) {
+                Some(item) => items.push(item),
+                None => {
+                    
+                }
+            }
+        }
+
+        (
+            HirCrate {
+                items: items
+            },
+            std::mem::take(&mut self.diagnostics)
+        )
     }
-}
-fn lower_item(item: AstItem) -> LowerResult<HirItem> {
-    match item {
-        AstItem::Function {
-            attribute,
-            visibility,
-            name,
-            return_type,
-            params,
-            body,
-            span,
-        } => {
-            let params = params
-                .into_iter()
-                .map(|p| lower_param(p))
-                .collect::<Result<Vec<_>, _>>()?;
-            let return_type = return_type
-                .map(|t| lower_type(t))
-                .transpose()?;
-            let visibility = lower_visibility(visibility);
-            let body = lower_block(body)?;
-            Ok(HirItem::Function {
+
+    fn low_item(&mut self, item: AstItem) -> Option<HirItem> {
+        match item {
+            AstItem::Function {
+                attribute,
                 visibility,
                 name,
-                params,
                 return_type,
+                params,
                 body,
                 span,
-            })
-        }
-        AstItem::Struct {
-            attribute,
-            visibility,
-            name,
-            fields,
-            span,
-        } => {
-            let visibility = lower_visibility(visibility);
-            let fields = fields
-                .into_iter()
-                .map(|f| lower_field(f))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(HirItem::Struct {
+            } => {
+                let attribute = match attribute {
+                    Some(attribute) => Some(self.low_attribute(attribute)?),
+                    None => None
+                };
+                let mut _params = Vec::new();
+                for param in params {
+                    _params.push(self.low_param(param)?);
+                }
+                let return_type = match return_type {
+                    Some(ty) => Some(self.low_type(ty)?),
+                    None => None
+                };
+                let visibility = self.low_visibility(visibility);
+                let body = self.low_block(body)?;
+                Some(HirItem::Function {
+                    attribute,
+                    visibility,
+                    name,
+                    params: _params,
+                    return_type,
+                    body,
+                    span,
+                })
+            }
+            AstItem::Struct {
+                attribute,
                 visibility,
                 name,
                 fields,
                 span,
-            })
-        },
-        AstItem::Use { 
-            visibility, 
-            path, 
-            items, 
-            rename,
-            span 
-        } => {
-            let visibility = lower_visibility(visibility);
-            let items = items.map(|items| {
-                items.into_iter()
-                    .map(|item| lower_use_item(item))
-                    .collect::<Result<Vec<_>, _>>()
-            }).transpose()?;
-            Ok(HirItem::Use {
-                visibility: visibility,
-                path: path,
-                items: items,
-                rename: rename,
-                span: span,
-            })
-        }
-        AstItem::Extern { 
-            visibility, 
-            abi, 
-            items, 
-            span
-        } => {
-            todo!()
+            } => {
+                let attribute = match attribute {
+                    Some(attribute) => Some(self.low_attribute(attribute)?),
+                    None => None
+                };
+                let visibility = self.low_visibility(visibility);
+                let mut _fields = Vec::new();
+                for field in fields {
+                    _fields.push(self.low_field(field)?);
+                }
+                Some(HirItem::Struct {
+                    attribute,
+                    visibility,
+                    name,
+                    fields: _fields,
+                    span,
+                })
+            },
+            AstItem::Use { 
+                visibility, 
+                path, 
+                items, 
+                rename,
+                span 
+            } => {
+                let visibility = self.low_visibility(visibility);
+                let mut _items: Vec<HirUseItem> = Vec::new();
+                for item in items {
+                    _items.push(self.low_use_item(item)?);
+                }
+                Some(HirItem::Use {
+                    visibility: visibility,
+                    path: path,
+                    items: _items,
+                    rename: rename,
+                    span: span,
+                })
+            }
+            AstItem::Extern { 
+                visibility, 
+                abi, 
+                items, 
+                span
+            } => {
+                let visibility = self.low_visibility(visibility);
+                let abi = HirAbiType::from(abi);
+
+                let mut _items = Vec::new();
+
+                for item in items {
+                    _items.push(self.low_extern_item(item)?);
+                }
+                Some(HirItem::Extern { 
+                    visibility, 
+                    abi, 
+                    items: _items, 
+                    span 
+                })
+            }
         }
     }
-}
 
-fn lower_use_item(item: UseItem) -> LowerResult<HirUseItem> {
-    let items = item.items.map(|items| {
-        items.into_iter()
-            .map(|item| lower_use_item(item))
-            .collect::<Result<Vec<_>, _>>()
-    }).transpose()?;
-    Ok(HirUseItem {
-        name: item.name,
-        rename: item.rename,
-        items: items,
-        span: item.span
-    })
-}
+    fn low_extern_item(&mut self, item: AstExternItem) -> Option<HirExternItem> {
+        match item {
+            AstExternItem::Function { name, params, return_type, span } => {
+                let mut _params = Vec::new();
 
-fn lower_block( block: AstBlock) -> LowerResult<HirBlock> {
-    let stmts = block
-        .stmts
-        .into_iter()
-        .map(|s| lower_stmt(s))
-        .collect::<Result<Vec<_>, _>>()?;
-    let tail = if let Some(expr) = block.tail {
-        Some(Box::new(lower_expr(*expr)?))
-    } else {
-        None
-    };
-    Ok(HirBlock {
-        stmts,
-        tail,
-        span: block.span,
-    })
-}
-fn lower_field( field: AstField) -> LowerResult<HirField> {
-    let ty = lower_type(field.ty)?;
-    let visibility = lower_visibility(field.visibility);
-    Ok(HirField {
-        name: field.name,
-        ty,
-        visibility,
-        span: field.span,
-    })
-}
-fn lower_expr(expr: AstExpr) -> LowerResult<HirExpr> {
-    match expr {
-        AstExpr::Block { block } => {
-            let block = lower_block(block)?;
-            Ok(HirExpr::Block { block })
-        }
-        AstExpr::Binary { left, op, right, span } => {
-            let left = Box::new(lower_expr(*left)?);
-            let right = Box::new(lower_expr(*right)?);
-            let expr = match op {
-                litec_ast::ast::BinOp::Add => todo!(),
-                litec_ast::ast::BinOp::Subtract => todo!(),
-                litec_ast::ast::BinOp::Multiply => todo!(),
-                litec_ast::ast::BinOp::Divide => todo!(),
-                litec_ast::ast::BinOp::Remainder => todo!(),
-                litec_ast::ast::BinOp::Equal => todo!(),
-                litec_ast::ast::BinOp::NotEqual => todo!(),
-                litec_ast::ast::BinOp::LessThan => todo!(),
-                litec_ast::ast::BinOp::LessEqual => todo!(),
-                litec_ast::ast::BinOp::GreaterThan => todo!(),
-                litec_ast::ast::BinOp::GreaterEqual => todo!(),
-                litec_ast::ast::BinOp::LogicalAnd => todo!(),
-                litec_ast::ast::BinOp::LogicalOr => todo!(),
-                litec_ast::ast::BinOp::BitAnd => todo!(),
-                litec_ast::ast::BinOp::BitOr => todo!(),
-                litec_ast::ast::BinOp::BitXor => todo!(),
-                litec_ast::ast::BinOp::ShiftLeft => todo!(),
-                litec_ast::ast::BinOp::ShiftRight => todo!(),
-            };
-            Ok(expr)
-        }
-        AstExpr::Unary { op, operand, span } => {
-            let operand = Box::new(lower_expr(*operand)?);
-            let expr = match op {
-                TokenKind::Bang => HirExpr::LogicalNot { operand, span },
-                TokenKind::Minus => HirExpr::Negate { operand, span },
-                _ => {
-                    return Err(Error::InvalidOperatorTypes {
-                        op,
-                        span,
-                    });
+                for param in params {
+                    _params.push(self.low_param(param)?);
                 }
-            };
-            Ok(expr)
-        }
-        AstExpr::Posifix { op, expr, span } => {
-            let operand = Box::new(lower_expr(*expr)?);
-            let value = match op {
-                TokenKind::PlusPlus => {
-                    let one = HirExpr::Literal {
-                        value: LiteralValue::Int {
-                            value: 1,
-                            kind: LitIntValue::Unknown,
-                        },
-                        span: Span::new(0, 0),
-                    };
-                    HirExpr::Addition {
-                        left: operand.clone(),
-                        right: Box::new(one),
-                        span,
-                    }
-                }
-                TokenKind::MinusMinus => {
-                    let one = HirExpr::Literal {
-                        value: LiteralValue::Int {
-                            value: 1,
-                            kind: LitIntValue::Unknown,
-                        },
-                        span: Span::new(0, 0),
-                    };
-                    HirExpr::Subtract {
-                        left: operand.clone(),
-                        right: Box::new(one),
-                        span,
-                    }
-                }
-                _ => {
-                    return Err(Error::InvalidOperatorTypes {
-                        op,
-                        span,
-                    });
-                }
-            };
-            Ok(HirExpr::Assign {
-                target: operand,
-                value: Box::new(value),
-                span,
-                original_op: Some(op),
-            })
-        }
-        AstExpr::Literal {
-            kind: LiteralKind::Int { base },
-            value,
-            suffix,
-            span,
-        } => {
-            let s = get_global_string(value).unwrap();
-            let radix = base as u32;
-            match i128::from_str_radix(&s, radix) {
-                Ok(num) => {
-                    let int_kind = if let Some(suffix_sid) = suffix {
-                        let suffix_str = get_global_string(suffix_sid).unwrap();
-                        match suffix_str.as_ref() {
-                            "i8" => LitIntValue::I8,
-                            "i16" => LitIntValue::I16,
-                            "i32" => LitIntValue::I32,
-                            "i64" => LitIntValue::I64,
-                            "i128" => LitIntValue::I128,
-                            "isize" => LitIntValue::Isize,
-                            "u8" => LitIntValue::U8,
-                            "u16" => LitIntValue::U16,
-                            "u32" => LitIntValue::U32,
-                            "u64" => LitIntValue::U64,
-                            "u128" => LitIntValue::U128,
-                            "usize" => LitIntValue::Usize,
-                            _ => {
-                                return Err(Error::InvalidLiteralSuffix {
-                                    suffix: suffix_str.as_ref().to_string(),
-                                    span,
-                                });
-                            }
-                        }
-                    } else {
-                        LitIntValue::Unknown
-                    };
-                    if !is_value_in_range(num, int_kind.clone()) {
-                        return Err(Error::IntegerLiteralOutOfRange {
-                            value: s.to_string(),
-                            ty: format!("{:?}", int_kind),
-                            span,
-                        });
-                    }
-                    Ok(HirExpr::Literal {
-                        value: LiteralValue::Int {
-                            value: num,
-                            kind: int_kind,
-                        },
-                        span,
-                    })
-                }
-                Err(e) => Err(Error::IntegerLiteralParseError {
-                    literal: s.to_string(),
-                    base: radix,
-                    error: e.to_string(),
-                    span,
-                }),
+
+                let return_type = match return_type {
+                    Some(ty) => Some(self.low_type(ty)?),
+                    None => None
+                };
+
+                Some(HirExternItem::Function { 
+                    name: name, 
+                    params: _params, 
+                    return_type: return_type, 
+                    span: span 
+                })
             }
         }
-        // 在 lower 函数中添加浮点数字面量处理
-        AstExpr::Literal {
-            kind: LiteralKind::Float { .. },
-            value,
-            suffix,
-            span,
-        } => {
-            let s = get_global_string(value).unwrap();
-        
-            // 解析为 f64（浮点数默认使用 f64 类型）
-            let num = match s.parse::<f64>() {
-                Ok(num) => num,
-                Err(e) => {
-                    return Err(Error::FloatLiteralParseError {
-                        literal: s.to_string(),
-                        error: e.to_string(),
-                        span,
-                    });
-                }
-            };
-        
-            // 确定目标浮点类型
-            let float_kind = if let Some(suffix_sid) = suffix {
-                let suffix_str = get_global_string(suffix_sid).unwrap();
-                match suffix_str.as_ref() {
-                    "f32" => LitFloatValue::F32,
-                    "f64" => LitFloatValue::F64,
-                    _ => {
-                        return Err(Error::InvalidFloatSuffix {
-                            suffix: suffix_str.as_ref().to_string(),
-                            span,
-                        });
-                    }
-                }
-            } else {
-                LitFloatValue::Unknown // 默认类型
-            };
-        
-            // 检查数值是否在目标类型范围内
-            match float_kind {
-                LitFloatValue::F32 => {
-                    if num < f32::MIN as f64 || num > f32::MAX as f64 {
-                        return Err(Error::FloatLiteralOutOfRange {
-                            value: s.to_string(),
-                            ty: "f32".to_string(),
-                            span,
-                        });
-                    }
-                }
-                LitFloatValue::F64 | _ => {
-                    // f64 范围很大，通常不会超出，但保留检查
-                    if num < f64::MIN || num > f64::MAX {
-                        return Err(Error::FloatLiteralOutOfRange {
-                            value: s.to_string(),
-                            ty: "f64".to_string(),
-                            span,
-                        });
-                    }
-                }
+    }
+
+    fn low_attribute(&mut self, attribute: AstAttribute) -> Option<HirAttribute> {
+        let kind = self.low_attribute_kind(attribute.kind)?;
+        Some(HirAttribute { name: attribute.name, kind: kind, span: attribute.span })
+    }
+
+    fn low_attribute_kind(&mut self, kind: AstAttributeKind)-> Option<HirAttributeKind> {
+        match kind {
+            AstAttributeKind::Simple => Some(HirAttributeKind::Simple),
+            AstAttributeKind::Positional(args) => {
+                 let mut _args = Vec::new();
+ 
+                 for arg in args {
+                     _args.push(self.low_expr(arg)?);
+                 }
+ 
+                 Some(HirAttributeKind::Positional(_args))
             }
-        
-            // 构建 HIR 浮点数字面量
-            Ok(HirExpr::Literal {
-                value: LiteralValue::Float {
-                    value: num,
-                    kind: float_kind,
-                },
-                span,
-            })
+            AstAttributeKind::Named(map) => {
+                let mut _map = FxHashMap::default();
+                for (key, value) in map.into_iter() {
+                    _map.insert(key, self.low_expr(value)?);
+                }
+
+                Some(HirAttributeKind::Named(_map))
+            }
+            AstAttributeKind::Mixed { positional, named } => {
+                let mut _args = Vec::new();
+
+                for arg in positional {
+                    _args.push(self.low_expr(arg)?);
+                }
+
+                let mut _map = FxHashMap::default();
+
+                for (key, value) in named.into_iter() {
+                    _map.insert(key, self.low_expr(value)?);
+                }
+
+                Some(HirAttributeKind::Mixed { 
+                    positional: _args, 
+                    named: _map 
+                })
+            }
         }
-        AstExpr::Literal { 
-            kind: LiteralKind::Str { .. }, 
-            value, 
-            span ,
-            ..
-        } => {
-            let s = get_global_string(value).unwrap();
-            if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-                let inner = &s[1..s.len()-1];
-                Ok(HirExpr::Literal { 
-                    value: LiteralValue::Str(intern_global(inner)), 
+    }
+
+    fn low_use_item(&self, item: UseItem) -> Option<HirUseItem> {
+        let mut items = Vec::new();
+        for item in item.items {
+            items.push(self.low_use_item(item)?);
+        }
+        Some(HirUseItem {
+            name: item.name,
+            rename: item.rename,
+            items: items,
+            span: item.span
+        })
+    }
+
+    fn low_block(&mut self, block: AstBlock) -> Option<HirBlock> {
+        let mut stmts = Vec::new();
+        for stmt in block.stmts {
+            stmts.push(self.low_stmt(stmt)?);
+        }
+        let tail = if let Some(expr) = block.tail {
+            Some(Box::new(self.low_expr(*expr)?))
+        } else {
+            None
+        };
+        Some(HirBlock {
+            stmts,
+            tail,
+            span: block.span,
+        })
+    }
+
+    fn low_field(&mut self, field: AstField) -> Option<HirField> {
+        let ty = self.low_type(field.ty)?;
+        let visibility = self.low_visibility(field.visibility);
+        Some(HirField {
+            name: field.name,
+            ty,
+            visibility,
+            span: field.span,
+        })
+    }
+
+    fn low_expr(&mut self, expr: AstExpr) -> Option<HirExpr> {
+        match expr {
+            AstExpr::Unit { span } => {
+                Some(HirExpr::Unit { span })
+            }
+            AstExpr::Tuple { elements, span } => {
+                let mut _elements = Vec::new();
+
+                for element in elements {
+                    _elements.push(self.low_expr(element)?);
+                }
+
+                Some(HirExpr::Tuple { elements: _elements, span })
+            }
+            AstExpr::ToEq { strat, end, span } => {
+                let start = Box::new(self.low_expr(*strat)?);
+                let end = Box::new(self.low_expr(*end)?);
+
+                Some(HirExpr::ToEq { start, end, span })
+            }
+            AstExpr::To { strat, end, span } => {
+                let start = Box::new(self.low_expr(*strat)?);
+                let end = Box::new(self.low_expr(*end)?);
+
+                Some(HirExpr::To { start, end, span })
+            }
+            AstExpr::Index { indexed, index, span } => {
+                let indexed = Box::new(self.low_expr(*indexed)?);
+                let index = Box::new(self.low_expr(*index)?);
+
+                Some(HirExpr::Index { indexed, index, span })
+            }
+            AstExpr::Block { block } => {
+                let block = self.low_block(block)?;
+                Some(HirExpr::Block { block })
+            }
+            AstExpr::Binary { left, op, right, span } => {
+                let left = Box::new(self.low_expr(*left)?);
+                let right = Box::new(self.low_expr(*right)?);
+                let op = BinOp::from(op);
+                Some(HirExpr::Binary { 
+                    left, 
+                    right, 
+                    op, 
                     span 
                 })
-            } else {
-                Err(Error::InvalidStringLiteral {
-                    literal: s.as_ref().to_string(),
-                    span,
-                })
             }
-        }
-        // 字符字面量的正确处理（如果需要）
-        AstExpr::Literal { 
-            kind: LiteralKind::Char { .. }, 
-            value, 
-            span ,
-            ..
-        } => {
-            let s = get_global_string(value).unwrap();
-            if s.len() == 3 && s.starts_with('\'') && s.ends_with('\'') {
-                let c = s.chars().nth(1).unwrap();
-                Ok(HirExpr::Literal { 
-                    value: LiteralValue::Char(c), 
+            AstExpr::Unary { op, operand, span } => {
+                let operand = Box::new(self.low_expr(*operand)?);
+                let op = UnOp::from(op);
+                Some(HirExpr::Unary { 
+                    op, 
+                    operand, 
                     span 
                 })
-            } else {
-                Err(Error::InvalidCharLiteral {
-                    literal: s.as_ref().to_string(),
-                    span,
+            }
+            AstExpr::Posifix { op, expr, span } => {
+                let operand = Box::new(self.low_expr(*expr)?);
+                let op = PosOp::from(op);
+                Some(HirExpr::Posifix { 
+                    operand, 
+                    op, 
+                    span 
                 })
             }
-        }
-        AstExpr::Ident { name, span } => Ok(HirExpr::Ident { name, span }),
-        AstExpr::Grouped { expr, span } => {
-            let expr = lower_expr(*expr)?;
-            Ok(HirExpr::Grouped { expr: Box::new(expr), span })
-        }
-        AstExpr::Assignment { target, op, value, span } => {
-            let target = Box::new(lower_expr(*target)?);
-            let value = Box::new(lower_expr(*value)?);
-            Ok(HirExpr::Assign {
-                target,
+            AstExpr::Literal {
+                kind: LiteralKind::Int { base },
                 value,
+                suffix,
                 span,
-                original_op: Some(op),
-            })
-        }
-        AstExpr::Call { callee, args, span } => {
-            let callee = Box::new(lower_expr(*callee)?);
-            let args = args
-                .into_iter()
-                .map(|arg| lower_expr(arg))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(HirExpr::Call {
-                callee,
-                args,
+            } => {
+                let literal = self.low_int_literal_value(
+                    base,
+                    value, 
+                    suffix, 
+                    span
+                )?;
+
+                Some(HirExpr::Literal { value: literal, span })
+            }
+            // 在 lower 函数中添加浮点数字面量处理
+            AstExpr::Literal {
+                kind: LiteralKind::Float { base },
+                value,
+                suffix,
                 span,
-            })
-        }
-        AstExpr::If {
-            condition,
-            then_branch,
-            else_branch,
-            span,
-        } => {
-            let condition = Box::new(lower_expr(*condition)?);
-            let then_branch = lower_block(then_branch)?;
-            let else_branch = if else_branch.is_some() {
-                Some(Box::new(lower_expr(*else_branch.unwrap())?))
-            } else {
-                None
-            };
-            Ok(HirExpr::If {
+            } => {
+                if base != Base::Decimal {
+                    self.diagnostics.push(error("并不支持非十进制浮点数")
+                                            .with_span(span)
+                                            .build());
+                    return None;
+                }
+                let literal = self.low_float_literal_value(
+                    value, 
+                    suffix, 
+                    span
+                )?;
+
+                Some(HirExpr::Literal { value: literal, span })
+            }
+            AstExpr::Literal { 
+                kind: LiteralKind::Str { .. }, 
+                value, 
+                suffix,
+                span ,
+            } => {
+                if suffix.is_some() {
+                    self.diagnostics.push(error("字符串不应有后缀")
+                                .with_span(span)
+                                .build());
+                    return None;
+                }
+                let s = get_global_string(value).unwrap();
+                if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+                    let inner = &s[1..s.len()-1];
+                    Some(HirExpr::Literal { 
+                        value: LiteralValue::Str(intern_global(inner)), 
+                        span 
+                    })
+                } else {
+                    self.diagnostics.push(error("非法字符串")
+                            .with_span(span)
+                            .build());
+                    return None;
+                }
+            }
+            // 字符字面量的正确处理（如果需要）
+            AstExpr::Literal { 
+                kind: LiteralKind::Char { .. }, 
+                value, 
+                suffix,
+                span ,
+            } => {
+                if suffix.is_some() {
+                    self.diagnostics.push(error("字符不应有后缀")
+                                .with_span(span)
+                                .build());
+                    return None;
+                }
+                let s = get_global_string(value).unwrap();
+                if s.len() == 3 && s.starts_with('\'') && s.ends_with('\'') {
+                    let c = s.chars().nth(1).unwrap();
+                    Some(HirExpr::Literal { 
+                        value: LiteralValue::Char(c), 
+                        span 
+                    })
+                } else {
+                    self.diagnostics.push(error("非法字符")
+                            .with_span(span)
+                            .build());
+                    return None;
+                }
+            }
+            AstExpr::Ident { name, span } => Some(HirExpr::Ident { name, span }),
+            AstExpr::Grouped { expr, span } => {
+                let expr = self.low_expr(*expr)?;
+                Some(HirExpr::Grouped { expr: Box::new(expr), span })
+            }
+            AstExpr::Assignment { target, op, value, span } => {
+                let target = Box::new(self.low_expr(*target)?);
+                let value = Box::new(self.low_expr(*value)?);
+                let op = AssignOp::from(op);
+                Some(HirExpr::Assign {
+                    target,
+                    value,
+                    op,
+                    span,
+                })
+            }
+            AstExpr::Call { callee, args, span } => {
+                let callee = Box::new(self.low_expr(*callee)?);
+                let mut _args = Vec::new();
+                
+                for arg in args {
+                    _args.push(self.low_expr(arg)?);
+                }
+
+                Some(HirExpr::Call {
+                    callee: callee,
+                    args: _args,
+                    span: span,
+                })
+            }
+            AstExpr::If {
                 condition,
                 then_branch,
                 else_branch,
                 span,
-            })
-        }
-        AstExpr::While { condition, body, span } => {
-            let condition = Box::new(lower_expr(*condition)?);
-            let body = lower_block(body)?;
-            let body = {
-                HirBlock {
-                    stmts: Vec::new(),
-                    tail: Some(
-                        Box::new(
-                            HirExpr::If { 
-                                condition: condition, 
-                                then_branch: body, 
-                                else_branch: Some(
-                                    Box::new(
-                                        HirExpr::Block { 
-                                            block: HirBlock { 
-                                                stmts: vec![
-                                                    HirStmt::Break { 
-                                                        value: None, 
-                                                        span: span 
-                                                    }
-                                                ], 
-                                                tail: None, 
-                                                span
-                                            } 
-                                        }
-                                    )
-                                ), 
-                                span: span 
-                            }
-                        )
-                    ),
-                    span: span
-                }
-            };
-            Ok(HirExpr::Loop {
-                body: Box::new(body),
-                span: span,
-            })
-        }
-        AstExpr::For {
-            ..
-        } => {
-            panic!("之后实现")
-        }
-        AstExpr::Loop { body, span } => {
-            let body = lower_block(body)?;
-            Ok(HirExpr::Loop { body: Box::new(body), span })
-        }
-        AstExpr::FieldAccess { base, name, span } => {
-            let base = Box::new(lower_expr(*base)?);
-            
-            Ok(HirExpr::FieldAccess { base: base, field: name, span: span })
-        }
-        AstExpr::PathAccess { segments, span } => {
-            Ok(HirExpr::PathAccess { segments: segments, span: span })
-        }
-        AstExpr::Bool { value, span } => Ok(HirExpr::Literal {
-            value: LiteralValue::Bool(value),
-            span,
-        }),
-    }
-}
-fn lower_stmt(stmt: AstStmt) -> LowerResult<HirStmt> {
-    match stmt {
-        AstStmt::Expr { expr } => {
-            let expr = lower_expr(*expr)?;
-            Ok(HirStmt::Expr(Box::new(expr)))
-        }
-        AstStmt::Let { mutable, name, ty, value, span } => {
-            let ty = ty.map(|t| lower_type(t)).transpose()?;
-            let value = value
-                .map(|v| lower_expr(v))
-                .transpose()?
-                .map(Box::new);
-            Ok(HirStmt::Let {
-                name,
-                ty,
-                value,
+            } => {
+                let condition = Box::new(self.low_expr(*condition)?);
+                let then_branch = self.low_block(then_branch)?;
+                let else_branch = if else_branch.is_some() {
+                    Some(Box::new(self.low_expr(*else_branch.unwrap())?))
+                } else {
+                    None
+                };
+                Some(HirExpr::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                    span,
+                })
+            }
+            AstExpr::While { condition, body, span } => {
+                let condition = Box::new(self.low_expr(*condition)?);
+                let body = self.low_block(body)?;
+                let body = {
+                    HirBlock {
+                        stmts: Vec::new(),
+                        tail: Some(
+                            Box::new(
+                                HirExpr::If { 
+                                    condition: condition, 
+                                    then_branch: body, 
+                                    else_branch: Some(
+                                        Box::new(
+                                            HirExpr::Block { 
+                                                block: HirBlock { 
+                                                    stmts: vec![
+                                                        HirStmt::Break { 
+                                                            value: None, 
+                                                            span: span 
+                                                        }
+                                                    ], 
+                                                    tail: None, 
+                                                    span
+                                                } 
+                                            }
+                                        )
+                                    ), 
+                                    span: span 
+                                }
+                            )
+                        ),
+                        span: span
+                    }
+                };
+                Some(HirExpr::Loop {
+                    body: Box::new(body),
+                    span: span,
+                })
+            }
+            AstExpr::For {
+                ..
+            } => {
+                panic!("之后实现")
+            }
+            AstExpr::Loop { body, span } => {
+                let body = self.low_block(body)?;
+                Some(HirExpr::Loop { body: Box::new(body), span })
+            }
+            AstExpr::FieldAccess { base, name, span } => {
+                let base = Box::new(self.low_expr(*base)?);
+
+                Some(HirExpr::FieldAccess { base: base, field: name, span: span })
+            }
+            AstExpr::PathAccess { segments, span } => {
+                Some(HirExpr::PathAccess { segments: segments, span: span })
+            }
+            AstExpr::Bool { value, span } => Some(HirExpr::Literal {
+                value: LiteralValue::Bool(value),
                 span,
             })
         }
-        AstStmt::Return { value, span } => {
-            let value = value
-                .map(|v| lower_expr(v))
-                .transpose()?
-                .map(Box::new);
-            Ok(HirStmt::Return { value, span })
-        }
-        AstStmt::Continue { span } => Ok(HirStmt::Continue { span }),
-        AstStmt::Break { value, span } => {
-            let value = value
-                .map(|v| lower_expr(v))
-                .transpose()?
-                .map(Box::new);
-            Ok(HirStmt::Break { value, span })
+    }
+    fn low_stmt(&mut self, stmt: AstStmt) -> Option<HirStmt> {
+        match stmt {
+            AstStmt::Expr { expr } => {
+                let expr = self.low_expr(*expr)?;
+                Some(HirStmt::Expr(Box::new(expr)))
+            }
+            AstStmt::Let { mutable, name, ty, value, span } => {
+                let mutable = HirMutability::from(mutable);
+                let ty = ty.map(|t| self.low_type(t))?;
+                let value = match value {
+                    Some(value) => Some(self.low_expr(value)?),
+                    None => None
+                };
+                Some(HirStmt::Let {
+                    mutable,
+                    name,
+                    ty,
+                    value,
+                    span,
+                })
+            }
+            AstStmt::Return { value, span } => {
+                let value = match value {
+                    Some(value) => Some(self.low_expr(value)?),
+                    None => None
+                };
+                Some(HirStmt::Return { value, span })
+            }
+            AstStmt::Continue { span } => Some(HirStmt::Continue { span }),
+            AstStmt::Break { value, span } => {
+                let value = match value {
+                    Some(value) => Some(self.low_expr(value)?),
+                    None => None
+                };
+                Some(HirStmt::Break { value, span })
+            }
         }
     }
-}
-fn lower_param(param: AstParam) -> LowerResult<HirParam> {
-    let ty = lower_type(param.ty)?;
-    Ok(HirParam {
-        name: param.name,
-        ty,
-        span: param.span,
-    })
-}
-fn lower_visibility( visibility: AstVisibility) -> HirVisibility {
-    match visibility {
-        AstVisibility::Public => HirVisibility::Public,
-        AstVisibility::Private => HirVisibility::Private,
+
+    fn low_param(&mut self, param: AstParam) -> Option<HirParam> {
+        let ty = self.low_type(param.ty)?;
+        Some(HirParam {
+            name: param.name,
+            ty,
+            span: param.span,
+        })
     }
-}
-fn lower_type( ty: TypeAnnotation) -> LowerResult<HirType> {
-    match ty {
-        TypeAnnotation::Ident { name, span } => Ok(HirType::Named { name, span }),
+
+    fn low_visibility(&mut self, visibility: AstVisibility) -> HirVisibility {
+        match visibility {
+            AstVisibility::Public => HirVisibility::Public,
+            AstVisibility::Private => HirVisibility::Private,
+        }
+    }
+
+    fn low_type(&mut self, ty: Type) -> Option<HirType> {
+        match ty {
+            Type::Ident { name, span } => Some(HirType::Named { name, span }),
+            Type::Generic { name, args, span } => {
+                let mut _args = Vec::new();
+                for ty in args {
+                    _args.push(self.low_type(ty)?);
+                }
+                
+                Some(HirType::Generic { 
+                    name, 
+                    args: _args, 
+                    span 
+                })
+            }
+            Type::Pointer { mutable, target, span } => {
+                let mutable = HirMutability::from(mutable);
+                let target = Box::new(self.low_type(*target)?);
+                Some(HirType::Pointer { 
+                    mutable: mutable, 
+                    target: target, 
+                    span 
+                })
+            }
+            Type::Tuple { elements, span } => {
+                let mut _elements = Vec::new();
+
+                for ty in elements {
+                    _elements.push(self.low_type(ty)?);
+                }
+
+                Some(HirType::Tuple {
+                    elements: _elements,
+                    span: span
+                })
+            }
+            Type::Reference { mutable, target, span } => {
+                let mutable = HirMutability::from(mutable);
+                let target = Box::new(self.low_type(*target)?);
+
+                Some(HirType::Reference {
+                    mutable: mutable,
+                    target: target,
+                    span: span
+                })
+            }
+        }
+    }
+
+    fn low_int_literal_value(
+        &mut self,
+        base: Base,
+        value: StringId,
+        suffix: Option<StringId>,
+        span: Span,
+    ) -> Option<LiteralValue> {
+        let s = get_global_string(value).unwrap();
+        let radix = base as u32;
+
+        // 解析整数值
+        let parsed_value = match i128::from_str_radix(&s, radix) {
+            Ok(value) => value,
+            Err(e) => {
+                self.diagnostics.push(error("数字解析失败")
+                    .with_help(e.to_string())
+                    .with_span(span)
+                    .build());
+                return None;
+            }
+        };
+        
+        // 处理后缀并创建相应的 LitIntValue
+        let int_value = if let Some(suffix_id) = suffix {
+            let suffix_str = get_global_string(suffix_id).unwrap();
+            match suffix_str.as_ref() {
+                "i8" => {
+                    if parsed_value < i8::MIN as i128 || parsed_value > i8::MAX as i128 {
+                        self.diagnostics.push(error("超出i8数字范围")
+                            .with_span(span)
+                            .build()
+                        );
+                    }
+                    LitIntValue::I8(parsed_value as i8)
+                }
+                "i16" => {
+                    if parsed_value < i16::MIN as i128 || parsed_value > i16::MAX as i128 {
+                        self.diagnostics.push(error("超出i16数字范围")
+                            .with_span(span)
+                            .build());
+                    }
+                    LitIntValue::I16(parsed_value as i16)
+                }
+                "i32" => {
+                    if parsed_value < i32::MIN as i128 || parsed_value > i32::MAX as i128 {
+                        self.diagnostics.push(error("超出i32数字范围")
+                            .with_span(span)
+                            .build());
+                    }
+                    LitIntValue::I32(parsed_value as i32)
+                }
+                "i64" => {
+                    if parsed_value < i64::MIN as i128 || parsed_value > i64::MAX as i128 {
+                        self.diagnostics.push(error("超出i64数字范围")
+                            .with_span(span)
+                            .build());
+                    }
+                    LitIntValue::I64(parsed_value as i64)
+                }
+                "i128" => LitIntValue::I128(parsed_value),
+                "isize" => {
+                    if cfg!(target_pointer_width = "64") {
+                        if parsed_value < i64::MIN as i128 || parsed_value > i64::MAX as i128 {
+                            self.diagnostics.push(error("超出isize数字范围")
+                            .with_span(span)
+                            .build());
+                        }
+                        LitIntValue::Isize(parsed_value as isize)
+                    } else {
+                        if parsed_value < i32::MIN as i128 || parsed_value > i32::MAX as i128 {
+                            self.diagnostics.push(error("超出isize数字范围")
+                            .with_span(span)
+                            .build());
+                        }
+                        LitIntValue::Isize(parsed_value as isize)
+                    }
+                }
+                "u8" => {
+                    if parsed_value < 0 || parsed_value > u8::MAX as i128 {
+                        self.diagnostics.push(error("超出u8数字范围")
+                            .with_span(span)
+                            .build());
+                    }
+                    LitIntValue::U8(parsed_value as u8)
+                }
+                "u16" => {
+                    if parsed_value < 0 || parsed_value > u16::MAX as i128 {
+                        self.diagnostics.push(error("超出i8数字范围")
+                            .with_span(span)
+                            .build());
+                    }
+                    LitIntValue::U16(parsed_value as u16)
+                }
+                "u32" => {
+                    if parsed_value < 0 || parsed_value > u32::MAX as i128 {
+                        self.diagnostics.push(error("超出u32数字范围")
+                            .with_span(span)
+                            .build());
+                    }
+                    LitIntValue::U32(parsed_value as u32)
+                }
+                "u64" => {
+                    if parsed_value < 0 || parsed_value > u64::MAX as i128 {
+                        self.diagnostics.push(error("超出u64数字范围")
+                            .with_span(span)
+                            .build());
+                    }
+                    LitIntValue::U64(parsed_value as u64)
+                }
+                "u128" => {
+                    if parsed_value < 0 {
+                        self.diagnostics.push(error("超出u128数字范围")
+                            .with_span(span)
+                            .build());
+                    }
+                    LitIntValue::U128(parsed_value as u128)
+                }
+                "usize" => {
+                    if cfg!(target_pointer_width = "64") {
+                        if parsed_value < 0 || parsed_value > u64::MAX as i128 {
+                            self.diagnostics.push(error("超出usize数字范围")
+                            .with_span(span)
+                            .build());
+                        }
+                        LitIntValue::Usize(parsed_value as usize)
+                    } else {
+                        if parsed_value < 0 || parsed_value > u32::MAX as i128 {
+                            self.diagnostics.push(error("超出usize数字范围")
+                            .with_span(span)
+                            .build());
+                        }
+                        LitIntValue::Usize(parsed_value as usize)
+                    }
+                }
+                _ => {
+                    self.diagnostics.push(error("位置数字后缀")
+                            .with_span(span)
+                            .build());
+                    return None;
+                }
+            }
+        } else {
+            // 无后缀的情况，使用 Unknown
+            if parsed_value < i16::MIN as i128 || parsed_value > i16::MAX as i128 {
+                self.diagnostics.push(error("超出i64数字范围")
+                            .with_span(span)
+                            .build());
+            }
+            LitIntValue::Unknown(parsed_value as i16)
+        };
+
+        Some(LiteralValue::Int {
+            value: int_value,
+        })
+    }
+
+    fn low_float_literal_value(
+        &mut self,
+        value: StringId,
+        suffix: Option<StringId>,
+        span: Span,
+    ) -> Option<LiteralValue> {
+        let s = get_global_string(value).unwrap();
+        // 解析浮点数值
+        let parsed_value = match s.parse::<f64>() {
+            Ok(value) => value,
+            Err(e) => {
+                self.diagnostics.push(error("数字解析失败")
+                    .with_help(e.to_string())
+                    .with_span(span)
+                    .build());
+                return None;
+            }
+        };
+        
+        // 处理后缀并创建相应的 LitFloatValue
+        let float_value = if let Some(suffix_id) = suffix {
+            let suffix_str = get_global_string(suffix_id).unwrap();
+            match suffix_str.as_ref() {
+                "f32" => {
+                    if parsed_value < f32::MIN as f64 || parsed_value > f32::MAX as f64 {
+                        self.diagnostics.push(error("超出u32数字范围")
+                            .with_span(span)
+                            .build());
+                    }
+                    LitFloatValue::F32(parsed_value as f32)
+                }
+                "f64" => {
+                    if parsed_value < f64::MIN || parsed_value > f64::MAX {
+                        self.diagnostics.push(error("超出f64数字范围")
+                            .with_span(span)
+                            .build());
+                    }
+                    LitFloatValue::F64(parsed_value)
+                }
+                _ => {
+                    self.diagnostics.push(error("位置数字后缀")
+                            .with_span(span)
+                            .build());
+                    return None;
+                }
+            }
+        } else {
+            // 无后缀的情况，使用 Unknown
+            if parsed_value < f32::MIN as f64 || parsed_value > f32::MAX as f64 {
+                self.diagnostics.push(error("超出f32数字范围")
+                            .with_span(span)
+                            .build());
+            }
+            LitFloatValue::Unknown(parsed_value as f32)
+        };
+
+        Some(LiteralValue::Float {
+            value: float_value,
+        })
     }
 }
 
-fn lower_literal_value(
-    kind: LiteralKind,
-    value: StringId,
-    suffix: Option<StringId>,
-    span: Span,
-) -> LowerResult<LiteralValue> {
-    match kind {
-        LiteralKind::Int { base } => {
-            let s = get_global_string(value).unwrap();
-            let radix = base as u32;
+pub fn low(krate: AstCrate) -> (HirCrate, Vec<Diagnostic>) {
+    let mut lower = Lower::new(krate);
+    lower.low()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use litec_ast::{ast::{
+        Block, Expr, Mutability, Stmt, Type
+    }, token::TokenKind};
+    use litec_span::{Location, Span};
+
+    // 创建一个虚拟的 Span 用于测试
+    fn dummy_span() -> Span {
+        Span::new(Location::default(), Location::default(), litec_span::FileId(0))
+    }
+
+    #[test]
+    fn test_lower_function() {
+        // 创建一个简单的函数 AST: fn main() -> i32 { 42 }
+        let ast_function = AstItem::Function {
+            attribute: None,
+            visibility: AstVisibility::Public,
+            name: intern_global("main"),
+            return_type: Some(Type::Ident { 
+                name: intern_global("i32"), 
+                span: dummy_span() 
+            }),
+            params: Vec::new(),
+            body: Block {
+                stmts: vec![
+                    Stmt::Return {
+                        value: Some(Expr::Literal {
+                            kind: LiteralKind::Int { base: Base::Decimal },
+                            value: intern_global("42"),
+                            suffix: None,
+                            span: dummy_span(),
+                        }),
+                        span: dummy_span(),
+                    }
+                ],
+                tail: None,
+                span: dummy_span(),
+            },
+            span: dummy_span(),
+        };
+
+        let ast_crate = AstCrate {
+            items: vec![ast_function],
+        };
+
+        let mut lower = Lower::new(ast_crate);
+        let (hir_crate, diagnostics) = lower.low();
+
+        // 检查没有错误
+        assert!(diagnostics.is_empty(), "Unexpected diagnostics: {:?}", diagnostics);
+        
+        // 检查 HIR 项数量
+        assert_eq!(hir_crate.items.len(), 1);
+        
+        // 检查函数转换
+        if let HirItem::Function { name, return_type, params, body, .. } = &hir_crate.items[0] {
+            assert_eq!(*name, intern_global("main"));
+            assert!(return_type.is_some());
+            assert!(params.is_empty());
             
-            // 解析整数值
-            let parsed_value = i128::from_str_radix(&s, radix)
-                .map_err(|e| {
-                    error("数字解析失败")
-                        .with_span(span)
-                        .build()
-                })?;
-            
-            // 处理后缀并创建相应的 LitIntValue
-            let int_value = if let Some(suffix_id) = suffix {
-                let suffix_str = get_global_string(suffix_id).unwrap();
-                match suffix_str.as_ref() {
-                    "i8" => {
-                        if parsed_value < i8::MIN as i128 || parsed_value > i8::MAX as i128 {
-                            return Err(error("超出i8数字范围")
-                                .with_span(span)
-                                .build()
-                            );
+            // 检查函数体中的返回语句
+            if let HirStmt::Return { value, .. } = &body.stmts[0] {
+                assert!(value.is_some());
+                if let Some(HirExpr::Literal { value: literal_value, .. }) = value.as_ref() {
+                    if let LiteralValue::Int { value: int_value } = literal_value {
+                        // 检查整数字面量值
+                        match int_value {
+                            LitIntValue::Unknown(val) => assert_eq!(*val, 42),
+                            _ => panic!("Expected Unknown integer literal"),
                         }
-                        LitIntValue::I8(parsed_value as i8)
+                    } else {
+                        panic!("Expected integer literal");
                     }
-                    "i16" => {
-                        if parsed_value < i16::MIN as i128 || parsed_value > i16::MAX as i128 {
-                            return Err(error("超出i16数字范围")
-                                .with_span(span)
-                                .build());
-                        }
-                        LitIntValue::I16(parsed_value as i16)
-                    }
-                    "i32" => {
-                        if parsed_value < i32::MIN as i128 || parsed_value > i32::MAX as i128 {
-                            return Err(error("超出i32数字范围")
-                                .with_span(span)
-                                .build());
-                        }
-                        LitIntValue::I32(parsed_value as i32)
-                    }
-                    "i64" => {
-                        if parsed_value < i64::MIN as i128 || parsed_value > i64::MAX as i128 {
-                            return Err(error("超出i64数字范围")
-                                .with_span(span)
-                                .build());
-                        }
-                        LitIntValue::I64(parsed_value as i64)
-                    }
-                    "i128" => LitIntValue::I128(parsed_value),
-                    "isize" => {
-                        if cfg!(target_pointer_width = "64") {
-                            if parsed_value < i64::MIN as i128 || parsed_value > i64::MAX as i128 {
-                                return Err(error("超出isize数字范围")
-                                .with_span(span)
-                                .build());
-                            }
-                            LitIntValue::Isize(parsed_value as isize)
-                        } else {
-                            if parsed_value < i32::MIN as i128 || parsed_value > i32::MAX as i128 {
-                                return Err(error("超出isize数字范围")
-                                .with_span(span)
-                                .build());
-                            }
-                            LitIntValue::Isize(parsed_value as isize)
-                        }
-                    }
-                    "u8" => {
-                        if parsed_value < 0 || parsed_value > u8::MAX as i128 {
-                            return Err(error("超出u8数字范围")
-                                .with_span(span)
-                                .build());
-                        }
-                        LitIntValue::U8(parsed_value as u8)
-                    }
-                    "u16" => {
-                        if parsed_value < 0 || parsed_value > u16::MAX as i128 {
-                            return Err(error("超出i8数字范围")
-                                .with_span(span)
-                                .build());
-                        }
-                        LitIntValue::U16(parsed_value as u16)
-                    }
-                    "u32" => {
-                        if parsed_value < 0 || parsed_value > u32::MAX as i128 {
-                            return Err(error("超出u32数字范围")
-                                .with_span(span)
-                                .build());
-                        }
-                        LitIntValue::U32(parsed_value as u32)
-                    }
-                    "u64" => {
-                        if parsed_value < 0 || parsed_value > u64::MAX as i128 {
-                            return Err(error("超出u64数字范围")
-                                .with_span(span)
-                                .build());
-                        }
-                        LitIntValue::U64(parsed_value as u64)
-                    }
-                    "u128" => {
-                        if parsed_value < 0 {
-                            return Err(error("超出u128数字范围")
-                                .with_span(span)
-                                .build());
-                        }
-                        LitIntValue::U128(parsed_value as u128)
-                    }
-                    "usize" => {
-                        if cfg!(target_pointer_width = "64") {
-                            if parsed_value < 0 || parsed_value > u64::MAX as i128 {
-                                return Err(error("超出usize数字范围")
-                                .with_span(span)
-                                .build());
-                            }
-                            LitIntValue::Usize(parsed_value as usize)
-                        } else {
-                            if parsed_value < 0 || parsed_value > u32::MAX as i128 {
-                                return Err(error("超出usize数字范围")
-                                .with_span(span)
-                                .build());
-                            }
-                            LitIntValue::Usize(parsed_value as usize)
-                        }
-                    }
-                    _ => {
-                        return Err(error("位置数字后缀")
-                                .with_span(span)
-                                .build());
-                    }
+                } else {
+                    panic!("Expected literal expression in return");
                 }
             } else {
-                // 无后缀的情况，使用 Unknown
-                if parsed_value < i16::MIN as i128 || parsed_value > i16::MAX as i128 {
-                    return Err(error("超出i64数字范围")
-                                .with_span(span)
-                                .build());
-                }
-                LitIntValue::Unknown(parsed_value as i16)
+                panic!("Expected return statement");
+            }
+        } else {
+            panic!("Expected function item");
+        }
+    }
+
+    #[test]
+    fn test_lower_struct() {
+        // 创建一个结构体 AST
+        let ast_struct = AstItem::Struct {
+            attribute: None,
+            visibility: AstVisibility::Public,
+            name: intern_global("Point"),
+            fields: vec![
+                AstField {
+                    name: intern_global("x"),
+                    ty: Type::Ident { 
+                        name: intern_global("i32"), 
+                        span: dummy_span() 
+                    },
+                    visibility: AstVisibility::Private,
+                    span: dummy_span(),
+                },
+                AstField {
+                    name: intern_global("y"),
+                    ty: Type::Ident { 
+                        name: intern_global("i32"), 
+                        span: dummy_span() 
+                    },
+                    visibility: AstVisibility::Private,
+                    span: dummy_span(),
+                },
+            ],
+            span: dummy_span(),
+        };
+
+        let ast_crate = AstCrate {
+            items: vec![ast_struct],
+        };
+
+        let mut lower = Lower::new(ast_crate);
+        let (hir_crate, diagnostics) = lower.low();
+
+        assert!(diagnostics.is_empty(), "Unexpected diagnostics: {:?}", diagnostics);
+        assert_eq!(hir_crate.items.len(), 1);
+        
+        if let HirItem::Struct { name, fields, .. } = &hir_crate.items[0] {
+            assert_eq!(*name, intern_global("Point"));
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name, intern_global("x"));
+            assert_eq!(fields[1].name, intern_global("y"));
+        } else {
+            panic!("Expected struct item");
+        }
+    }
+
+    #[test]
+    fn test_lower_literals() {
+        // 测试各种字面量的转换
+        let test_cases = vec![
+            (
+                Expr::Literal {
+                    kind: LiteralKind::Int { base: Base::Decimal },
+                    value: intern_global("123"),
+                    suffix: None,
+                    span: dummy_span(),
+                },
+                "整数 123"
+            ),
+            (
+                Expr::Literal {
+                    kind: LiteralKind::Float { base: Base::Decimal },
+                    value: intern_global("3.14"),
+                    suffix: None,
+                    span: dummy_span(),
+                },
+                "浮点数 3.14"
+            ),
+            (
+                Expr::Literal {
+                    kind: LiteralKind::Str { terminated: true },
+                    value: intern_global("\"hello\""),
+                    suffix: None,
+                    span: dummy_span(),
+                },
+                "字符串 \"hello\""
+            ),
+            (
+                Expr::Bool {
+                    value: true,
+                    span: dummy_span(),
+                },
+                "布尔值 true"
+            ),
+        ];
+
+        for (expr, description) in test_cases {
+            let ast_function = AstItem::Function {
+                attribute: None,
+                visibility: AstVisibility::Public,
+                name: intern_global("test"),
+                return_type: None,
+                params: Vec::new(),
+                body: Block {
+                    stmts: vec![Stmt::Expr {
+                        expr: Box::new(expr),
+                    }],
+                    tail: None,
+                    span: dummy_span(),
+                },
+                span: dummy_span(),
             };
-            
-            Ok(LiteralValue::Int {
-                value: int_value,
-            })
-        }
-        LiteralKind::Float { .. } => {
-            let s = get_global_string(value).unwrap();
-            
-            // 解析浮点数值
-            let parsed_value = s.parse::<f64>()
-                .map_err(|e| {
-                    error("超出u32数字范围")
-                                .with_help(e.to_string())
-                                .with_span(span)
-                                .build()
-                })?;
-            
-            // 处理后缀并创建相应的 LitFloatValue
-            let float_value = if let Some(suffix_id) = suffix {
-                let suffix_str = get_global_string(suffix_id).unwrap();
-                match suffix_str.as_ref() {
-                    "f32" => {
-                        if parsed_value < f32::MIN as f64 || parsed_value > f32::MAX as f64 {
-                            return Err(error("超出u32数字范围")
-                                .with_span(span)
-                                .build());
-                        }
-                        LitFloatValue::F32(parsed_value as f32)
-                    }
-                    "f64" => {
-                        if parsed_value < f64::MIN || parsed_value > f64::MAX {
-                            return Err(error("超出f64数字范围")
-                                .with_span(span)
-                                .build());
-                        }
-                        LitFloatValue::F64(parsed_value)
-                    }
-                    _ => {
-                        return Err(error("位置数字后缀")
-                                .with_span(span)
-                                .build());
-                    }
-                }
-            } else {
-                // 无后缀的情况，使用 Unknown
-                if parsed_value < f32::MIN as f64 || parsed_value > f32::MAX as f64 {
-                    return Err(error("超出f32数字范围")
-                                .with_span(span)
-                                .build());
-                }
-                LitFloatValue::Unknown(parsed_value as f32)
+
+            let ast_crate = AstCrate {
+                items: vec![ast_function],
             };
-            
-            Ok(LiteralValue::Float {
-                value: float_value,
-            })
+
+            let mut lower = Lower::new(ast_crate);
+            let (hir_crate, diagnostics) = lower.low();
+
+            assert!(
+                diagnostics.is_empty(), 
+                "Failed to lower {}: {:?}", 
+                description, 
+                diagnostics
+            );
+            assert_eq!(hir_crate.items.len(), 1);
         }
-        LiteralKind::Str { terminated } => {
-            if !terminated {
-                return Err(error("未关闭的字符串")
-                    .with_span(span)
-                    .build());
-            }
-            let s = get_global_string(value).unwrap();
-            if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-                let inner = &s[1..s.len()-1];
-                Ok(LiteralValue::Str(intern_global(inner)))
+    }
+
+    #[test]
+    fn test_lower_binary_expression() {
+        // 测试二元表达式: 1 + 2
+        let binary_expr = Expr::Binary {
+            left: Box::new(Expr::Literal {
+                kind: LiteralKind::Int { base: Base::Decimal },
+                value: intern_global("1"),
+                suffix: None,
+                span: dummy_span(),
+            }),
+            op: TokenKind::Add,
+            right: Box::new(Expr::Literal {
+                kind: LiteralKind::Int { base: Base::Decimal },
+                value: intern_global("2"),
+                suffix: None,
+                span: dummy_span(),
+            }),
+            span: dummy_span(),
+        };
+
+        let ast_function = AstItem::Function {
+            attribute: None,
+            visibility: AstVisibility::Public,
+            name: intern_global("test_binary"),
+            return_type: None,
+            params: Vec::new(),
+            body: Block {
+                stmts: vec![Stmt::Expr {
+                    expr: Box::new(binary_expr),
+                }],
+                tail: None,
+                span: dummy_span(),
+            },
+            span: dummy_span(),
+        };
+
+        let ast_crate = AstCrate {
+            items: vec![ast_function],
+        };
+
+        let mut lower = Lower::new(ast_crate);
+        let (hir_crate, diagnostics) = lower.low();
+
+        assert!(diagnostics.is_empty(), "Unexpected diagnostics: {:?}", diagnostics);
+        assert_eq!(hir_crate.items.len(), 1);
+        
+        // 检查二元表达式是否正确转换
+        if let HirItem::Function { body, .. } = &hir_crate.items[0] {
+            if let HirStmt::Expr(expr) = &body.stmts[0] {
+                if let HirExpr::Binary { left, right, op, .. } = &**expr {
+                    assert!(matches!(op, BinOp::Add));
+                    // 可以进一步检查左右操作数
+                } else {
+                    panic!("Expected binary expression");
+                }
             } else {
-                Err(error("非法字符串")
-                                .with_span(span)
-                                .build())
+                panic!("Expected expression statement");
             }
         }
-        LiteralKind::Char { terminated } => {
-            if !terminated {
-                return Err(error("字符未关闭")
-                                .with_span(span)
-                                .build());
-            }
-            let s = get_global_string(value).unwrap();
-            if s.len() == 3 && s.starts_with('\'') && s.ends_with('\'') {
-                let c = s.chars().nth(1).unwrap();
-                Ok(LiteralValue::Char(c))
+    }
+
+    #[test]
+    fn test_lower_variable_declaration() {
+        // 测试变量声明: let x: i32 = 10;
+        let ast_function = AstItem::Function {
+            attribute: None,
+            visibility: AstVisibility::Public,
+            name: intern_global("test_var"),
+            return_type: None,
+            params: Vec::new(),
+            body: Block {
+                stmts: vec![Stmt::Let {
+                    mutable: Mutability::Const,
+                    name: intern_global("x"),
+                    ty: Some(Type::Ident { 
+                        name: intern_global("i32"), 
+                        span: dummy_span() 
+                    }),
+                    value: Some(Expr::Literal {
+                        kind: LiteralKind::Int { base: Base::Decimal },
+                        value: intern_global("10"),
+                        suffix: None,
+                        span: dummy_span(),
+                    }),
+                    span: dummy_span(),
+                }],
+                tail: None,
+                span: dummy_span(),
+            },
+            span: dummy_span(),
+        };
+
+        let ast_crate = AstCrate {
+            items: vec![ast_function],
+        };
+
+        let mut lower = Lower::new(ast_crate);
+        let (hir_crate, diagnostics) = lower.low();
+
+        assert!(diagnostics.is_empty(), "Unexpected diagnostics: {:?}", diagnostics);
+        assert_eq!(hir_crate.items.len(), 1);
+        
+        if let HirItem::Function { body, .. } = &hir_crate.items[0] {
+            if let HirStmt::Let { name, ty, value, .. } = &body.stmts[0] {
+                assert_eq!(*name, intern_global("x"));
+                assert!(ty.is_some());
+                assert!(value.is_some());
             } else {
-                Err(error("非法字符")
-                                .with_span(span)
-                                .build())
+                panic!("Expected let statement");
             }
         }
+    }
+
+    #[test]
+    fn test_lower_error_handling() {
+        // 测试错误处理：无效的浮点数基数
+        let invalid_float = Expr::Literal {
+            kind: LiteralKind::Float { base: Base::Hexadecimal }, // 十六进制浮点数，应该报错
+            value: intern_global("0x1.0"),
+            suffix: None,
+            span: dummy_span(),
+        };
+
+        let ast_function = AstItem::Function {
+            attribute: None,
+            visibility: AstVisibility::Public,
+            name: intern_global("test_error"),
+            return_type: None,
+            params: Vec::new(),
+            body: Block {
+                stmts: vec![Stmt::Expr {
+                    expr: Box::new(invalid_float),
+                }],
+                tail: None,
+                span: dummy_span(),
+            },
+            span: dummy_span(),
+        };
+
+        let ast_crate = AstCrate {
+            items: vec![ast_function],
+        };
+
+        let mut lower = Lower::new(ast_crate);
+        let (hir_crate, diagnostics) = lower.low();
+
+        // 应该产生错误诊断
+        assert!(!diagnostics.is_empty(), "Expected error diagnostics for invalid float base");
+        // 错误项应该被跳过（返回 None）
+        assert_eq!(hir_crate.items.len(), 0);
     }
 }

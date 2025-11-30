@@ -1,4 +1,5 @@
 use litec_span::{Span, StringId};
+use rustc_hash::FxHashMap;
 use crate::token::{LiteralKind, TokenKind};
 
 #[derive(Debug)]
@@ -15,8 +16,23 @@ impl Crate {
 #[derive(Debug, Clone)]
 pub struct Attribute {
     pub name: StringId,
-    pub args: Option<Vec<StringId>>,
-    pub span: Span
+    pub kind: AttributeKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum AttributeKind {
+    /// 无参数：#[attr]
+    Simple,
+    /// 只有位置参数：#[attr(expr1, expr2)]
+    Positional(Vec<Expr>),
+    /// 只有命名参数：#[attr(key = value)]
+    Named(FxHashMap<StringId, Expr>),
+    /// 混合参数：#[attr(pos, key = value)]
+    Mixed {
+        positional: Vec<Expr>,
+        named: FxHashMap<StringId, Expr>,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -31,7 +47,7 @@ pub enum Item {
         attribute: Option<Attribute>,
         visibility: Visibility,
         name: StringId,
-        return_type: Option<TypeAnnotation>,
+        return_type: Option<Type>,
         params: Vec<Param>,
         body: Block,
         span: Span
@@ -46,7 +62,7 @@ pub enum Item {
     Use {
         visibility: Visibility,
         path: Vec<StringId>,
-        items: Option<Vec<UseItem>>,
+        items: Vec<UseItem>,
         rename: Option<StringId>,
         span: Span,
     },
@@ -63,7 +79,7 @@ pub enum ExternItem {
     Function {
         name: StringId,
         params: Vec<Param>,
-        return_type: Option<TypeAnnotation>,
+        return_type: Option<Type>,
         span: Span,
     },
 }
@@ -79,14 +95,14 @@ pub enum AbiType {
 pub struct UseItem {
     pub name: StringId, // 例如 "stdin"
     pub rename: Option<StringId>, // 可选的重命名，例如 "stdin" -> "my_stdin"
-    pub items: Option<Vec<UseItem>>, // 递归定义，例如 d::e
+    pub items: Vec<UseItem>, // 递归定义，例如 d::e
     pub span: Span
 }
 
 #[derive(Debug, Clone)]
 pub struct Param {
     pub name: StringId,
-    pub ty: TypeAnnotation,
+    pub ty: Type,
     pub span: Span
 }
 
@@ -100,23 +116,51 @@ pub struct Block {
 #[derive(Debug, Clone)]
 pub struct Field {
     pub name: StringId,
-    pub ty: TypeAnnotation,
+    pub ty: Type,
     pub visibility: Visibility,
     pub span: Span
 }
 
 #[derive(Debug, Clone)]
-pub enum TypeAnnotation {
+pub enum Type {
+    /// 一个基本的类型就像 [`i32`] [`i64`] ...
     Ident {
         name: StringId,
+        span: Span
+    },
+    /// 一个泛型比如 [`Vec<i32>`] ...
+    Generic {
+        name: StringId,
+        args: Vec<Type>,
+        span: Span
+    },
+    /// 一个类型数列像 [`(i32, i64)`] ...
+    Tuple {
+        elements: Vec<Type>,
+        span: Span
+    },
+    /// 引用 像 [`&i32`] ...
+    Reference {
+        mutable: Mutability,
+        target: Box<Type>,
+        span: Span
+    },
+    /// 指针 像 [`*mut i32`] ...
+    Pointer {
+        mutable: Mutability,
+        target: Box<Type>,
         span: Span
     }
 }
 
-impl TypeAnnotation {
+impl Type {
     pub fn span(&self) -> Span {
         match self {
-            Self::Ident { span, .. } => *span
+            Self::Ident { span, .. } => *span,
+            Self::Generic { span, .. } => *span,
+            Self::Tuple { span, .. } => *span,
+            Self::Pointer { span, .. } => *span,
+            Self::Reference { span, .. } => *span,
         }
     }
 }
@@ -155,7 +199,7 @@ pub enum Expr {
     },
     Assignment {
         target: Box<Expr>,
-        op: AssignOp,
+        op: TokenKind,
         value: Box<Expr>,
         span: Span,
     },
@@ -194,6 +238,11 @@ pub enum Expr {
         end: Box<Expr>,
         span: Span
     },
+    ToEq {
+        strat: Box<Expr>,
+        end: Box<Expr>,
+        span: Span
+    },
     Loop {
         body: Block,
         span: Span
@@ -217,7 +266,13 @@ pub enum Expr {
     },
     Unit {
         span: Span
-    }
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mutability {
+    Mut,
+    Const
 }
 
 #[derive(Debug, Clone)]
@@ -226,9 +281,9 @@ pub enum Stmt {
         expr: Box<Expr>
     },
     Let {
-        mutable: bool,
+        mutable: Mutability,
         name: StringId,
-        ty: Option<TypeAnnotation>,
+        ty: Option<Type>,
         value: Option<Expr>,
         span: Span,
     },
@@ -243,18 +298,6 @@ pub enum Stmt {
         value: Option<Expr>,
         span: Span
     }
-}
-
-// 赋值操作符 - 用于赋值，不产生值（或者说产生单位值）
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AssignOp {
-    Simple,     // =
-    Add,        // +=
-    Subtract,   // -=
-    Multiply,   // *=
-    Divide,     // /=
-    Remainder,  // %=
-    // 可以根据需要添加更多
 }
 
 // 为包含 `span: Span` 字段的结构体实现 `span()` 方法
@@ -307,7 +350,7 @@ impl_span_for_enum_with_common_span!(Item, Function, Struct, Use, Extern);
 // 为 Expr 实现（通用变体 + Block 特殊变体）
 impl_span_for_enum_with_block!(
     Expr,
-    Binary, PathAccess, Unary, Literal, Ident, Grouped, Assignment, Call, If, While, Loop, For, Posifix, FieldAccess, Bool, To, Index, Tuple, Unit;
+    Binary, PathAccess, Unary, Literal, Ident, Grouped, Assignment, Call, If, While, Loop, For, Posifix, FieldAccess, Bool, To, Index, Tuple, Unit, ToEq;
     Block
 );
 

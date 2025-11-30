@@ -1,8 +1,8 @@
 pub mod def_id;
 pub mod ty;
 
-use litec_span::{Span, StringId};
 use litec_hir::LiteralValue;
+use litec_span::{Span, StringId};
 
 use crate::{def_id::DefId, ty::Ty};
 
@@ -10,10 +10,12 @@ use crate::{def_id::DefId, ty::Ty};
 pub enum DefKind {
     Function,
     Struct,
-    Const,
+    Variable,
+    Parameter,
+    Field,
     Module,
-    Variable
-    // 你可以根据需要添加更多种类
+    Constant,
+    ExternFunction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,133 +39,133 @@ pub enum TypedExpr {
     Literal {
         value: LiteralValue,
         ty: Ty,
-        span: Span
+        span: Span,
     },
     Ident {
-        name: StringId,      // 用于错误提示
-        def_id: DefId,       // ✅ 指向定义
+        name: StringId, // 用于错误提示
+        def_id: DefId,  // ✅ 指向定义
         ty: Ty,
-        span: Span
+        span: Span,
     },
     Addition {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
-    Subtract { 
+    Subtract {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
-    Multiply { 
+    Multiply {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
     Divide {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
     Remainder {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
 
     Equal {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty, // bool
-        span: Span
+        span: Span,
     },
     NotEqual {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty, // bool
-        span: Span
+        span: Span,
     },
-    LessThan { 
+    LessThan {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty, // bool
-        span: Span
+        span: Span,
     },
     LessThanOrEqual {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty, // bool
-        span: Span
+        span: Span,
     },
     GreaterThan {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty, // bool
-        span: Span
+        span: Span,
     },
     GreaterThanOrEqual {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty, // bool
-        span: Span
+        span: Span,
     },
 
     LogicalAnd {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
-    LogicalOr { 
+    LogicalOr {
         left: Box<TypedExpr>,
         right: Box<TypedExpr>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
     LogicalNot {
         operand: Box<TypedExpr>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
 
     Assign {
         target: Box<TypedExpr>,
         value: Box<TypedExpr>,
         ty: Ty, // () 或其他
-        span: Span
+        span: Span,
     },
 
     Negate {
         operand: Box<TypedExpr>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
     Dereference {
         expr: Box<TypedExpr>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
     AddressOf {
         base: Box<TypedExpr>,
         mutable: bool,
         ty: Ty,
-        span: Span
+        span: Span,
     },
 
     Call {
         callee: DefId,
         args: Vec<TypedExpr>,
         ty: Ty, // 返回类型
-        span: Span
+        span: Span,
     },
 
     Block {
-        block: TypedBlock
+        block: TypedBlock,
     },
 
     If {
@@ -171,13 +173,13 @@ pub enum TypedExpr {
         then_branch: TypedBlock,
         else_branch: Option<Box<TypedExpr>>,
         ty: Ty,
-        span: Span
+        span: Span,
     },
 
     Loop {
         body: TypedBlock,
         ty: Ty, // ! (never type)
-        span: Span
+        span: Span,
     },
 
     FieldAccess {
@@ -185,13 +187,13 @@ pub enum TypedExpr {
         field: StringId,
         def_id: DefId,
         ty: Ty,
-        span: Span
+        span: Span,
     },
 
     PathAccess {
-        def_id: DefId,          // 全局唯一
+        def_id: DefId, // 全局唯一
         ty: Ty,
-        span: Span
+        span: Span,
     },
 }
 
@@ -204,21 +206,21 @@ pub enum TypedStmt {
     Expr(Box<TypedExpr>),
     Let {
         name: StringId,
-        def_id: DefId,       // 变量的 DefId
-        ty: Ty,           // 声明的类型
+        def_id: DefId, // 变量的 DefId
+        ty: Ty,        // 声明的类型
         init: Option<Box<TypedExpr>>,
-        span: Span
+        span: Span,
     },
     Return {
         value: Option<Box<TypedExpr>>,
-        span: Span
+        span: Span,
     },
     Break {
         value: Option<Box<TypedExpr>>,
-        span: Span
+        span: Span,
     },
     Continue {
-        span: Span
+        span: Span,
     },
 }
 
@@ -227,7 +229,7 @@ pub struct TypedBlock {
     pub stmts: Vec<TypedStmt>,
     pub tail: Option<Box<TypedExpr>>,
     pub ty: Ty,
-    pub span: Span
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -235,26 +237,26 @@ pub struct TypedParam {
     pub name: StringId,
     pub def_id: DefId,
     pub ty: Ty,
-    pub span: Span
+    pub span: Span,
 }
 
 #[derive(Debug)]
 pub enum TypedItem {
-    Function    {
+    Function {
         def_id: DefId,
         visibility: Visibility,
         name: StringId,
         params: Vec<TypedParam>,
         return_ty: Ty,
         body: TypedBlock,
-        span: Span
+        span: Span,
     },
     Struct {
         def_id: DefId,
         visibility: Visibility,
         name: StringId,
         fields: Vec<TypedField>,
-        span: Span
+        span: Span,
     },
 }
 
@@ -264,18 +266,18 @@ pub struct TypedField {
     pub def_id: DefId,
     pub ty: Ty,
     pub visibility: Visibility,
-    pub span: Span
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub enum Visibility {
     Public,
-    Private
+    Private,
 }
 
 macro_rules! impl_ty {
     (
-        $enum_name:ident, 
+        $enum_name:ident,
         [ $($common_variant:ident),* $(,)? ],
         ($($special_arm:tt)*)
     ) => {
@@ -304,7 +306,7 @@ impl_ty!(
 
 macro_rules! impl_span_for_enum {
     (
-        $enum_name:ident, 
+        $enum_name:ident,
         [ $($common_variant:ident),* $(,)? ],
         ($($special_arm:tt)*)
     ) => {

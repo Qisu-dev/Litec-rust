@@ -2,7 +2,7 @@ use litec_ast::token::{Base, Token, TokenKind};
 use litec_ast::token::TokenKind::*;
 use litec_ast::token::LiteralKind::*;
 use litec_span::{intern_global, FileId, SourceFile, SourceMap, Span};
-use litec_error::{error, invalid_character, unterminated_char, unterminated_string, Diagnostic, DiagnosticLevel};
+use litec_error::{error, invalid_character, unterminated_char, unterminated_string, Diagnostic};
 use unicode_properties::UnicodeEmoji;
 
 /// Lexer 结果类型
@@ -151,7 +151,7 @@ impl<'src> Lexer<'src> {
                     None => return self.advance_token(),
                 }
             },
-            '^' => { self.advance(1); Caret },
+            '^' => { self.advance(1); BitXor },
             '%' => self.lex_percent(),
 
             '\'' => self.lex_char()?,
@@ -197,7 +197,13 @@ impl<'src> Lexer<'src> {
         match self.current_char() {
             Some('.') => {
                 self.advance(1);
-                To
+                match self.current_char() {
+                    Some('.') => {
+                        self.advance(1);
+                        ToEq
+                    }
+                    _ => To
+                }
             }
             _ => Dot
         }
@@ -224,7 +230,7 @@ impl<'src> Lexer<'src> {
                 self.advance(1); // 消费 '='
                 PlusEq
             }
-            _ => Plus,
+            _ => Add,
         }
     }
 
@@ -259,7 +265,7 @@ impl<'src> Lexer<'src> {
                 FatArrow
             }
             _ => {
-                Eq
+                Assign
             }
         }
     }
@@ -276,21 +282,31 @@ impl<'src> Lexer<'src> {
 
     fn lex_lt(&mut self) -> TokenKind {
         self.advance(1); // 消费 '<'
-        if self.current_char() == Some('=') {
-            self.advance(1); // 消费 '='
-            LtEq
-        } else {
-            Lt
+        match self.current_char() {
+            Some('=') => {
+                self.advance(1);
+                Le
+            }
+            Some('<') => {
+                self.advance(1);
+                Shl
+            }
+            _ => Lt
         }
     }
 
     fn lex_gt(&mut self) -> TokenKind {
         self.advance(1); // 消费 '>'
-        if self.current_char() == Some('=') {
-            self.advance(1); // 消费 '='
-            GtEq
-        } else {
-            Gt
+        match self.current_char() {
+            Some('=') => {
+                self.advance(1);
+                Ge
+            }
+            Some('>') => {
+                self.advance(1);
+                Shr
+            }
+            _ => Gt
         }
     }
 
@@ -329,9 +345,9 @@ impl<'src> Lexer<'src> {
             }
             Some('=') => {
                 self.advance(1);
-                Some(SlashEq)
+                Some(DivEq)
             }
-            _ => Some(Slash),
+            _ => Some(Div),
         }
     }
 
@@ -340,9 +356,9 @@ impl<'src> Lexer<'src> {
         match self.current_char() {
             Some('=') => {
                 self.advance(1);
-                StarEq
+                MulEq
             }
-            _ => Star
+            _ => Mul
         }
     }
 
@@ -519,14 +535,14 @@ impl<'src> Lexer<'src> {
         // 检查错误情况
         if !is_float && empty_int {
             let span = self.make_span();
-            return Err(error("unterminated_int")
+            return Err(error("未关闭的整数")
                         .with_span(span)
                     .build());
         }
         
         if is_float && empty_exponent {
             let span = self.make_span();
-            return Err(error("unterminated_float")
+            return Err(error("未关闭的浮点数")
                         .with_span(span)
                         .build());
         }
@@ -612,6 +628,7 @@ impl<'src> Lexer<'src> {
             "as" => As,
             "extern" => Extern,
             "mut" => Mut,
+            "const" => Const,
             _ => Ident,
         }
     }
@@ -858,13 +875,13 @@ mod tests {
         let mut lexer = Lexer::new(source_file, file_id);
         
         let expected_operators = vec![
-            TokenKind::Plus, TokenKind::PlusPlus, TokenKind::PlusEq,
+            TokenKind::Add, TokenKind::PlusPlus, TokenKind::PlusEq,
             TokenKind::Minus, TokenKind::MinusMinus, TokenKind::MinusEq, TokenKind::Arrow,
-            TokenKind::Eq, TokenKind::EqEq, TokenKind::FatArrow,
+            TokenKind::Assign, TokenKind::EqEq, TokenKind::FatArrow,
             TokenKind::Bang, TokenKind::NotEq,
-            TokenKind::Lt, TokenKind::LtEq, TokenKind::Gt, TokenKind::GtEq,
+            TokenKind::Lt, TokenKind::Le, TokenKind::Gt, TokenKind::Ge,
             TokenKind::BitAnd, TokenKind::And, TokenKind::BitOr, TokenKind::Or,
-            TokenKind::Star, TokenKind::StarEq, TokenKind::Slash, TokenKind::SlashEq,
+            TokenKind::Mul, TokenKind::MulEq, TokenKind::Div, TokenKind::DivEq,
             TokenKind::Remainder, TokenKind::RemainderEq,
             TokenKind::Dot, TokenKind::To, TokenKind::Colon, TokenKind::PathAccess,
         ];

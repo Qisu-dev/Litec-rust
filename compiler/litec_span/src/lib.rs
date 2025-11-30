@@ -119,7 +119,7 @@ pub struct Span {
     pub file: FileId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Location {
     pub line: usize,
     pub column: usize,

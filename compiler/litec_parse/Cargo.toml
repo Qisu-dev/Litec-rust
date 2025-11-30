@@ -10,6 +10,7 @@ litec_ast = { path = "../litec_ast" }
 litec_span = { path = "../litec_span" }
 litec_error = { path = "../litec_error" }
 unicode-xid = "0.2.6"
+rustc-hash = "2.1.1"
 
 [dependencies.unicode-properties]
 version = "0.1.3"

@@ -1,6 +1,8 @@
 use litec_span::{Span, StringId};
 use litec_ast::token::TokenKind;
+use litec_ast::ast;
 use rustc_hash::FxHashMap;
+use litec_ast::ast::AbiType as AstAbiType;
 
 #[derive(Debug, Clone)]
 pub struct Crate {
@@ -16,25 +18,23 @@ pub struct Attribute {
 
 #[derive(Debug, Clone)]
 pub enum AttributeKind {
-    /// has no argument attribute like #[test]
+    /// 无参数：#[attr]
     Simple,
-    /// an attribute has arguments like #[derive(Debug, Clone)]
-    WithArguments(Vec<AttributeValue>),
-    /// 键值对参数：#[cfg(target_os = "linux")]
-    KeyValue(FxHashMap<StringId, AttributeValue>),
-}
-
-#[derive(Debug, Clone)]
-pub enum AttributeValue {
-    Ident(StringId),    // 标识符：Clone, Debug
-    String(StringId),   // 字符串："linux"
-    Number(f64),        // 数字：42, 3.14
-    Bool(bool),         // 布尔值：true, false
+    /// 只有位置参数：#[attr(expr1, expr2)]
+    Positional(Vec<Expr>),
+    /// 只有命名参数：#[attr(key = value)]
+    Named(FxHashMap<StringId, Expr>),
+    /// 混合参数：#[attr(pos, key = value)]
+    Mixed {
+        positional: Vec<Expr>,
+        named: FxHashMap<StringId, Expr>,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum Item {
     Function {
+        attribute: Option<Attribute>,
         visibility: Visibility,
         name: StringId,
         params: Vec<Param>,
@@ -43,6 +43,7 @@ pub enum Item {
         span: Span,
     },
     Struct {
+        attribute: Option<Attribute>,
         visibility: Visibility,
         name: StringId,
         fields: Vec<Field>,
@@ -51,9 +52,40 @@ pub enum Item {
     Use {
         visibility: Visibility,
         path: Vec<StringId>,
-        items: Option<Vec<UseItem>>,
+        items: Vec<UseItem>,
         rename: Option<StringId>,
         span: Span,
+    },
+    Extern {
+        visibility: Visibility,
+        abi: AbiType,
+        items: Vec<ExternItem>,
+        span: Span
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ExternItem {
+    Function {
+        name: StringId,
+        params: Vec<Param>,
+        return_type: Option<Type>,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AbiType {
+    Builtin,
+    C
+}
+
+impl From<AstAbiType> for AbiType {
+    fn from(value: AstAbiType) -> Self {
+        match value {
+            AstAbiType::Builtin => Self::Builtin,
+            AstAbiType::C => Self::C
+        }
     }
 }
 
@@ -61,7 +93,7 @@ pub enum Item {
 pub struct UseItem {
     pub name: StringId,
     pub rename: Option<StringId>,
-    pub items: Option<Vec<UseItem>>,
+    pub items: Vec<UseItem>,
     pub span: Span
 }
 
@@ -93,13 +125,46 @@ pub struct Field {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Mutability {
+    Mut,
+    Const
+}
+
+impl From<ast::Mutability> for Mutability {
+    fn from(value: ast::Mutability) -> Self {
+        match value {
+            ast::Mutability::Mut => Self::Mut,
+            ast::Mutability::Const => Self::Const
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Type {
     Named {
         name: StringId,
         span: Span,
     },
-    // 可以添加更多类型变体
+    Generic {
+        name: StringId,
+        args: Vec<Type>,
+        span: Span
+    },
+    Tuple {
+        elements: Vec<Type>,
+        span: Span
+    },
+    Reference {
+        mutable: Mutability,
+        target: Box<Type>,
+        span: Span
+    },
+    Pointer {
+        mutable: Mutability,
+        target: Box<Type>,
+        span: Span
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -115,95 +180,30 @@ pub enum Expr {
     },
     
     // 算术运算
-    Addition {
+    Binary {
         left: Box<Expr>,
         right: Box<Expr>,
-        span: Span,
+        op: BinOp,
+        span: Span
     },
-    Subtract {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    Multiply {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    Divide {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    Remainder {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    
-    // 比较运算
-    Equal {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    NotEqual {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    LessThan {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    LessThanOrEqual {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    GreaterThan {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    GreaterThanOrEqual {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    
-    // 逻辑运算
-    LogicalAnd {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    LogicalOr {
-        left: Box<Expr>,
-        right: Box<Expr>,
-        span: Span,
-    },
-    LogicalNot {
+
+    Unary {
+        op: UnOp,
         operand: Box<Expr>,
-        span: Span,
+        span: Span
+    },
+
+    Posifix {
+        operand: Box<Expr>,
+        op: PosOp,
+        span: Span
     },
     
     // 赋值运算 - 统一使用基本的 Assign 节点
     Assign {
         target: Box<Expr>,
+        op: AssignOp,
         value: Box<Expr>,
-        span: Span,
-        original_op: Option<TokenKind>, // 保留原始操作符信息
-    },
-    
-    // 一元运算
-    Negate {
-        operand: Box<Expr>,
-        span: Span,
-    },
-    AddressOf {
-        base: Box<Expr>,
         span: Span,
     },
     
@@ -241,28 +241,171 @@ pub enum Expr {
         expr: Box<Expr>,
         span: Span,
     },
+
+    Index {
+        indexed: Box<Expr>,
+        index: Box<Expr>,
+        span: Span
+    },
+
+    To {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        span: Span
+    },
+    ToEq {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        span: Span
+    },
+    Tuple {
+        elements: Vec<Expr>,
+        span: Span
+    },
+    Unit {
+        span: Span
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Expr(Box<Expr>),
     Let {
+        mutable: Mutability,
         name: StringId,
         ty: Option<Type>,
-        value: Option<Box<Expr>>,
+        value: Option<Expr>,
         span: Span,
     },
     Return {
-        value: Option<Box<Expr>>,
+        value: Option<Expr>,
         span: Span,
     },
     Break {
-        value: Option<Box<Expr>>,
+        value: Option<Expr>,
         span: Span,
     },
     Continue {
         span: Span,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnOp {
+    Neg,    // - (算术负)
+    Not,    // ! (逻辑非)
+    Deref,  // * (解引用)
+    AddrOf, // & (取地址)
+}
+
+impl From<TokenKind> for UnOp {
+    fn from(value: TokenKind) -> Self {
+        match value {
+            TokenKind::Minus => Self::Neg,
+            TokenKind::Bang => Self::Not,
+            TokenKind::Mul => Self::Deref,
+            TokenKind::BitAnd => Self::AddrOf,
+            _ => unreachable!()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AssignOp {
+    Simple,     // =
+    Add,        // +=
+    Subtract,   // -=
+    Multiply,   // *=
+    Divide,     // /=
+    Remainder,  // %=
+    // 可以根据需要添加更多
+}
+
+impl From<TokenKind> for AssignOp {
+    fn from(value: TokenKind) -> Self {
+        match value {
+            TokenKind::Assign => Self::Simple,
+            TokenKind::PlusEq => Self::Add,
+            TokenKind::MinusEq => Self::Subtract,
+            TokenKind::MulEq => Self::Multiply,
+            TokenKind::DivEq => Self::Divide,
+            TokenKind::RemainderEq => Self::Remainder,
+            _ => unreachable!()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    // 算术运算
+    Add,    // +
+    Sub,    // -
+    Mul,    // *
+    Div,    // /
+    Rem,    // %
+    
+    // 比较运算  
+    Eq,     // ==
+    Ne,     // !=
+    Lt,     // <
+    Le,     // <=
+    Gt,     // >
+    Ge,     // >=
+    
+    // 逻辑运算
+    And,    // &&
+    Or,     // ||
+    
+    // 位运算
+    BitAnd, // &
+    BitOr,  // |
+    BitXor, // ^
+    Shl,    // <<
+    Shr,    // >>
+}
+
+impl From <TokenKind> for BinOp {
+    fn from(value: TokenKind) -> Self {
+        match value {
+            TokenKind::Add => Self::Add,
+            TokenKind::Minus => Self::Sub,
+            TokenKind::Mul => Self::Mul,
+            TokenKind::Div => Self::Div,
+            TokenKind::Remainder => Self::Rem,
+            TokenKind::EqEq => Self::Eq,
+            TokenKind::NotEq => Self::Ne,
+            TokenKind::Lt => Self::Lt,
+            TokenKind::Le => Self::Le,
+            TokenKind::Gt => Self::Gt,
+            TokenKind::Ge => Self::Ge,
+            TokenKind::And => Self::And,
+            TokenKind::Or => Self::Or,
+            TokenKind::BitAnd => Self::BitAnd,
+            TokenKind::BitOr => Self::BitOr,
+            TokenKind::BitXor => Self::BitXor,
+            TokenKind::Shl => Self::Shl,
+            TokenKind::Shr => Self::Shr,
+            _ => unreachable!()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PosOp {
+    /// ++
+    Plus,
+    /// --
+    Sub,
+}
+
+impl From<TokenKind> for PosOp {
+    fn from(value: TokenKind) -> Self {
+        match value {
+            TokenKind::PlusPlus => Self::Plus,
+            TokenKind::MinusMinus => Self::Sub,
+            _ => unreachable!()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -319,11 +462,10 @@ macro_rules! impl_span_for_enum {
 impl_span_for_enum!(
     Expr,
     [
-        Literal, Ident, Addition, Subtract, Multiply, Divide, Remainder,
-        Equal, NotEqual, LessThan, LessThanOrEqual, GreaterThan, GreaterThanOrEqual,
-        LogicalAnd, LogicalOr, LogicalNot,
-        Assign, Negate, AddressOf,
-        Call, If, Loop, FieldAccess, PathAccess, Grouped
+        Literal, Ident, Binary,
+        Assign, Unary,
+        Call, If, Loop, FieldAccess, PathAccess, Grouped, Posifix,
+        Index, To, ToEq, Tuple, Unit
     ],
     (Expr::Block { block } => block.span)
 );
