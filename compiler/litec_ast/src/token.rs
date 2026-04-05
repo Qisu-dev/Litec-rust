@@ -1,18 +1,18 @@
 use litec_span::{Span, StringId};
 
-#[derive(Debug,PartialEq,Clone)]
-pub struct Token<'src> {
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct Token {
     pub span: Span,
     pub kind: TokenKind,
-    pub text: &'src str
+    pub text: StringId,
 }
 
-impl<'src> Token<'src> {
-    pub fn new(kind: TokenKind, span: Span, text: &'src str) -> Self{
+impl Token {
+    pub fn new(kind: TokenKind, span: Span, text: StringId) -> Self {
         Token {
             span: span,
             kind: kind,
-            text: text
+            text: text,
         }
     }
 }
@@ -82,10 +82,14 @@ pub enum TokenKind {
     MinusEq,
     /// `&`
     BitAnd,
+    /// `&=`
+    BitAndEq,
     /// `&&`
     And,
     /// `|`
     BitOr,
+    /// `|=`
+    BitOrEq,
     /// `||`
     Or,
     /// `+`
@@ -104,6 +108,8 @@ pub enum TokenKind {
     DivEq,
     /// `^`
     BitXor,
+    /// `^=`
+    BitXorEq,
     /// `%`
     Remainder,
     /// `%=`
@@ -114,12 +120,18 @@ pub enum TokenKind {
     FatArrow,
     /// `..`
     To,
-    /// `..`
+    /// `..=`
     ToEq,
+    /// `...`
+    Ellipsis,
     /// `<<`
     Shl,
+    /// `<<=`
+    ShlEq,
     /// `>>`
     Shr,
+    /// `>>=`
+    ShrEq,
 
     // Keyword
     Fn,
@@ -127,7 +139,6 @@ pub enum TokenKind {
     If,
     Else,
     While,
-    For,
     Return,
     True,
     False,
@@ -143,6 +154,17 @@ pub enum TokenKind {
     Extern,
     Mut,
     Const,
+    Mod,
+    Super,
+    Crate,
+    /// self
+    SelfLower,
+    /// Self
+    SelfUpper,
+    Trait,
+    Type,
+    Impl,
+    For,
 
     Error,
     Eof,
@@ -150,30 +172,8 @@ pub enum TokenKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LiteralKind {
-    Int {
-        base: Base
-    },
-
-    Float {
-        base: Base
-    },
-
-    Char {
-        terminated: bool
-    },
-
-    Str {
-        terminated: bool
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Base {
-    Binary = 2,
-    
-    Octal = 8,
-    
-    Decimal = 10,
-    
-    Hexadecimal = 16
+    Integer,
+    Float,
+    Char,
+    Str,
 }

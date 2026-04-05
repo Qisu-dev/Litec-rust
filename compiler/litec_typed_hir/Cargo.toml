@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 litec_span = { path = "../litec_span" }
 litec_hir = { path = "../litec_hir" }
+litec_ty = { path = "../litec_ty" }

@@ -5,11 +5,22 @@ edition = "2024"
 
 [dependencies]
 litec_mir = { path = "../litec_mir" }
+litec_hir = { path = "../litec_hir" }
 litec_typed_hir = { path = "../litec_typed_hir" }
 litec_span = { path = "../litec_span" }
-inkwell = { version = "0.6.0", features = ["llvm18-1"] }
+litec_error = { path = "../litec_error" }
 
+inkwell = { workspace = true }
 anyhow = "1.0.100"
 rustc-hash = "2.1.1"
+cfg-if = "1.0.4"
+which = "8.0.0"
 
 [lib]
+
+[dev-dependencies]
+litec_parse = { path = "../litec_parse" }
+litec_name_resolver = { path = "../litec_name_resolver" }
+litec_type_checker = { path = "../litec_type_checker" }
+litec_mir_lower = { path = "../litec_mir_lower" }
+litec_ast_lower = { path = "../litec_ast_lower" }

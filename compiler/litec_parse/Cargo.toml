@@ -9,10 +9,12 @@ edition = "2024"
 litec_ast = { path = "../litec_ast" }
 litec_span = { path = "../litec_span" }
 litec_error = { path = "../litec_error" }
+litec_session = { path = "../litec_session" }
+
 unicode-xid = "0.2.6"
 rustc-hash = "2.1.1"
 
 [dependencies.unicode-properties]
-version = "0.1.3"
+version = "0.1.4"
 default-features = false
 features = ["emoji"]

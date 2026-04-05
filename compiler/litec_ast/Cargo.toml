@@ -3,8 +3,9 @@ name = "litec_ast"
 version = "0.1.0"
 edition = "2024"
 
-[lib]
-
 [dependencies]
 litec_span = { path = "../litec_span" }
-rustc-hash = "2.1.1"
+litec_ty = { path = "../litec_ty" }
+index_vec = "0.1.4"
+
+[lib]

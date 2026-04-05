@@ -1,1284 +1,1348 @@
 pub mod linker;
-use std::path::Path;
 
 use inkwell::{
-    builder::Builder, context::Context, module::Module, targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine}, types::{BasicType, BasicTypeEnum}, values::{BasicValueEnum, FunctionValue, PointerValue}, AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel
+    self, AddressSpace, IntPredicate,
+    builder::Builder,
+    context::Context,
+    module::{Linkage, Module},
+    targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine},
+    types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum},
+    values::{
+        BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue, ValueKind,
+    },
 };
-use litec_span::{get_global_string, StringId};
-use rustc_hash::FxHashMap;
-
-// 导入您的 MIR 类型
+use litec_error::{Diagnostic, error};
+use litec_hir::{AbiType, BinOp, FloatKind, LiteralIntKind, LiteralValue, UnOp};
 use litec_mir::{
-    BasicBlockId, BinOp, FloatKind, IntKind, Literal, LocalId, MirFunction, Operand, Place, PlaceBase, Rvalue, Statement, SwitchTargets, Terminator, Ty, UnOp
+    self, AggregateKind, BasicBlock, Constant, ConstantKind, Local, LocalDecl, MirCrate, MirExtern,
+    MirExternFunction, MirExternItem, MirFunction, MirItem, MirModule, MirStruct, MirUse, Operand,
+    Place, PlaceElem, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
 };
+use litec_span::{Span, get_global_string};
+use litec_typed_hir::{CastKind, builtins::BuiltinFunction, def_id::DefId, ty::Ty};
+use rustc_hash::FxHashMap;
+use std::path::Path;
+
+use crate::linker::Linker;
+
+#[derive(Clone, Copy)]
+struct PointerInfo<'ctx> {
+    ptr: PointerValue<'ctx>,
+    pointee_ty: BasicTypeEnum<'ctx>,
+    is_signed: bool,
+}
+
+#[derive(Clone, Debug)]
+struct TypeInfo<'ctx> {
+    llvm_type: BasicTypeEnum<'ctx>,
+    ty: Ty,
+}
 
 pub struct CodeGen<'ctx> {
-    pub context: &'ctx Context,
-    pub module: Module<'ctx>,
-    pub builder: Builder<'ctx>,
-    
-    // 运行时状态
-    local_vars: FxHashMap<LocalId, PointerValue<'ctx>>,
-    basic_blocks: FxHashMap<BasicBlockId, inkwell::basic_block::BasicBlock<'ctx>>,
-    local_types: FxHashMap<LocalId, Ty>,
-    
-    // 外部函数声明
-    printf_fn: Option<FunctionValue<'ctx>>,
+    context: &'ctx Context,
+    module: Module<'ctx>,
+    builder: Builder<'ctx>,
+    mir_crate: MirCrate,
+    /// 函数定义映射
+    value_map: FxHashMap<DefId, FunctionValue<'ctx>>,
+    /// 当前函数的局部变量映射（参数 + 局部变量）
+    locals: FxHashMap<Local, PointerInfo<'ctx>>,
+    /// 当前正在处理的函数
+    current_function: Option<FunctionValue<'ctx>>,
+    current_function_def_id: Option<DefId>,
+    current_function_decls: Vec<LocalDecl>,
+    /// 结构体类型映射
+    struct_types: FxHashMap<DefId, inkwell::types::StructType<'ctx>>,
+
+    is_main: bool,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl<'ctx> CodeGen<'ctx> {
-    pub fn new(context: &'ctx Context, module_name: &str) -> Self {
-        let module = context.create_module(module_name);
+    pub fn new(context: &'ctx Context, mir_crate: MirCrate) -> Self {
+        let module = context.create_module("main");
         let builder = context.create_builder();
-        
         Self {
             context,
             module,
             builder,
-            local_vars: FxHashMap::default(),
-            basic_blocks: FxHashMap::default(),
-            local_types: FxHashMap::default(),
-            printf_fn: None,
-        }
-    }
-    
-    // 声明 printf 函数（使用不透明指针）
-    fn declare_printf(&mut self) -> FunctionValue<'ctx> {
-        if let Some(printf) = self.printf_fn {
-            return printf;
-        }
-        
-        let i32_type = self.context.i32_type();
-        // 使用默认地址空间 (AddressSpace(0))
-        let ptr_type = self.context.ptr_type(AddressSpace::default());
-        
-        // printf 函数签名：i32 (ptr, ...)
-        let printf_type = i32_type.fn_type(&[ptr_type.into()], true);
-        let printf_fn = self.module.add_function("printf", printf_type, None);
-        self.printf_fn = Some(printf_fn);
-        
-        printf_fn
-    }
-    
-    // 或者使用更清晰的方式
-    fn declare_printf_clear(&mut self) -> FunctionValue<'ctx> {
-        let i32_type = self.context.i32_type();
-        
-        // 多种创建 AddressSpace 的方式：
-        let address_space = AddressSpace::from(0);
-        
-        let ptr_type = self.context.ptr_type(address_space);
-        let printf_type = i32_type.fn_type(&[ptr_type.into()], true);
-        let printf_fn = self.module.add_function("printf", printf_type, None);
-        
-        printf_fn
-    }
-    
-    // 编译字符串字面量
-    fn compile_string_literal(&self, content: &str, name: &str) -> PointerValue<'ctx> {
-        // build_global_string_ptr 内部会处理地址空间
-        let global_string = self.builder.build_global_string_ptr(content, name);
-        global_string.expect("Failed to create global value").as_pointer_value()
-    }
-    
-    // 为局部变量分配内存
-    fn allocate_local(&mut self, local_id: LocalId, ty: &Ty) -> Option<()> {
-        // 跳过 void 类型的局部变量分配
-        if matches!(ty, Ty::Unit | Ty::Never) {
-            return None;
-        }
-        
-        let llvm_type = self.get_value_type(ty.clone())?;
-        
-        // build_alloca 返回的指针已经在正确的地址空间中
-        let alloca = self.builder.build_alloca(llvm_type, &format!("local_{}", local_id.0)).expect("alloc error");
-        self.local_vars.insert(local_id, alloca);
-        
-        Some(())
-    }
-
-     // 专门处理函数返回类型
-    fn get_return_type(&self, ty: &Ty) -> inkwell::types::FunctionType<'ctx> {
-        match ty {
-            Ty::Unit | Ty::Never => {
-                // void 类型需要特殊处理
-                self.context.void_type().fn_type(&[], false)
-            }
-            _ => {
-                if let Some(value_type) = self.get_value_type(ty.clone()) {
-                    value_type.fn_type(&[], false)
-                } else {
-                    // 回退到 void
-                    self.context.void_type().fn_type(&[], false)
-                }
-            }
-        }
-    }
-    
-    // 检查类型是否可以作为变量类型
-    fn is_valid_variable_type(&self, ty: &Ty) -> bool {
-        !matches!(ty, Ty::Unit | Ty::Never)
-    }
-
-    fn get_value_type(&self, ty: Ty) -> Option<BasicTypeEnum<'ctx>> {
-        match ty {
-            // 整数类型
-            Ty::Int(int_kind) => Some(self.convert_int_type(int_kind).into()),
-            
-            // 浮点类型
-            Ty::Float(float_kind) => Some(self.convert_float_type(float_kind).into()),
-            
-            // 布尔类型
-            Ty::Bool => Some(self.context.bool_type().into()),
-            
-            // 未知类型 - 使用默认的 i8
-            Ty::Unknown => Some(self.context.i8_type().into()),
-
-            _ => None
+            mir_crate,
+            value_map: FxHashMap::default(),
+            locals: FxHashMap::default(),
+            current_function: None,
+            current_function_def_id: None,
+            current_function_decls: Vec::new(),
+            struct_types: FxHashMap::default(),
+            is_main: false,
+            diagnostics: Vec::new(),
         }
     }
 
-    // 获取平台相关的指针大小
-    fn get_pointer_size(&self) -> u32 {
-        // 可以通过编译时配置或运行时检测
-        #[cfg(target_pointer_width = "64")]
-        return 64;
-        
-        #[cfg(target_pointer_width = "32")]
-        return 32;
-        
-        #[cfg(target_pointer_width = "16")]
-        return 16;
-    }
-    
-    // 根据平台获取 isize/usize 类型
-    fn get_platform_int_type(&self) -> inkwell::types::IntType<'ctx> {
-        match self.get_pointer_size() {
-            64 => self.context.i64_type(),
-            32 => self.context.i32_type(),
-            16 => self.context.i16_type(),
-            _ => self.context.i64_type(), // 默认
-        }
-    }
-    
-    // 处理整数类型转换
-    fn convert_int_type(&self, int_kind: IntKind) -> inkwell::types::IntType<'ctx> {
-        match int_kind {
-            // 有符号整数
-            IntKind::I8 => self.context.i8_type(),
-            IntKind::I16 => self.context.i16_type(),
-            IntKind::I32 => self.context.i32_type(),
-            IntKind::I64 => self.context.i64_type(),
-            IntKind::I128 => self.context.i128_type(),
-            IntKind::Isize => self.get_platform_int_type(),
-            
-            // 无符号整数 - LLVM 中实际上没有无符号类型的概念
-            // 符号性在操作中体现，类型本身相同
-            IntKind::U8 => self.context.i8_type(),
-            IntKind::U16 => self.context.i16_type(),
-            IntKind::U32 => self.context.i32_type(),
-            IntKind::U64 => self.context.i64_type(),
-            IntKind::U128 => self.context.i128_type(),
-            IntKind::Usize => self.get_platform_int_type(), // 假设 64 位平台
-        }
-    }
-    
-    // 处理浮点类型转换
-    fn convert_float_type(&self, float_kind: FloatKind) -> inkwell::types::FloatType<'ctx> {
-        match float_kind {
-            FloatKind::F32 => self.context.f32_type(),
-            FloatKind::F64 => self.context.f64_type(),
-        }
-    }
-}
+    pub fn generate(&mut self) {
+        let items = std::mem::take(&mut self.mir_crate.items);
 
-impl<'ctx> CodeGen<'ctx> {
-    // 编译操作数
-    pub fn compile_operand(&mut self, operand: &Operand) -> Option<BasicValueEnum<'ctx>> {
-        match operand {
-            Operand::Literal(literal) => self.compile_literal(literal),
-            Operand::Local(local_id) => self.compile_local(*local_id),
-            Operand::Static(def_id) => {
-                eprintln!("Warning: Static variables not yet implemented: {:?}", def_id);
-                None
+        // 声明所有结构体类型
+        for item in &items {
+            if let MirItem::Struct(mir_struct) = item {
+                self.declare_struct(mir_struct);
             }
         }
-    }
-    
-    // 编译字面量
-    fn compile_literal(&self, literal: &Literal) -> Option<BasicValueEnum<'ctx>> {
-        match literal {
-            Literal::I8(val) => Some(self.context.i8_type().const_int(*val as u64, false).into()),
-            Literal::I16(val) => Some(self.context.i16_type().const_int(*val as u64, false).into()),
-            Literal::I32(val) => Some(self.context.i32_type().const_int(*val as u64, false).into()),
-            Literal::I64(val) => Some(self.context.i64_type().const_int(*val as u64, false).into()),
-            Literal::I128(val) => {
-                let high = ((*val as u128) >> 64) as u64;
-                let low = (*val as u128) as u64;
-                Some(self.context.i128_type().const_int_arbitrary_precision(&[low, high]).into())
-            }
-            Literal::U8(val) => Some(self.context.i8_type().const_int(*val as u64, false).into()),
-            Literal::U16(val) => Some(self.context.i16_type().const_int(*val as u64, false).into()),
-            Literal::U32(val) => Some(self.context.i32_type().const_int(*val as u64, false).into()),
-            Literal::U64(val) => Some(self.context.i64_type().const_int(*val, false).into()),
-            Literal::U128(val) => {
-                let high = (*val >> 64) as u64;
-                let low = *val as u64;
-                Some(self.context.i128_type().const_int_arbitrary_precision(&[low, high]).into())
-            }
-            Literal::F32(val) => Some(self.context.f32_type().const_float(*val as f64).into()),
-            Literal::F64(val) => Some(self.context.f64_type().const_float(*val).into()),
-            Literal::Bool(val) => Some(self.context.bool_type().const_int(*val as u64, false).into()),
-            Literal::Unit => None, // Unit 没有值
-            Literal::Never => None, // Never 没有值
-            Literal::Str(string_id) => {
-                let content = get_global_string(*string_id).unwrap();
-                let global_str = self.builder.build_global_string_ptr(&content, &format!("str_{}", string_id.0))
-                    .expect("Failed to create global string");
-                Some(global_str.as_pointer_value().into())
-            }
-            Literal::Char(ch) => Some(self.context.i8_type().const_int(*ch as u64, false).into()),
-            Literal::Isize(val) => Some(self.get_platform_int_type().const_int(*val as u64, false).into()),
-            Literal::Usize(val) => Some(self.get_platform_int_type().const_int(*val as u64, false).into()),
+
+        // 生成内置函数声明
+        for builtin_function in std::mem::take(&mut self.mir_crate.builtin.functions) {
+            self.generate_c_function(builtin_function);
+        }
+
+        // 生成所有项
+        for item in items {
+            self.generate_item(item);
         }
     }
 
-    // 编译终结符
-    fn compile_terminator(&mut self, terminator: &Terminator, return_ty: &Ty) -> Option<()> {
-        match terminator {
-            Terminator::Goto { target, span: _ } => {
-                let target_bb = self.basic_blocks.get(target)?;
-                self.builder.build_unconditional_branch(*target_bb);
-                Some(())
-            }
-            Terminator::Return { value, span: _ } => {
-                match return_ty {
-                    Ty::Unit | Ty::Never => {
-                        // void 返回
-                        self.builder.build_return(None);
-                    }
-                    _ => {
-                        // 有值返回
-                        if let Some(return_value) = self.compile_operand(value) {
-                            self.builder.build_return(Some(&return_value));
-                        } else {
-                            eprintln!("Error: Failed to compile return value");
-                            return None;
-                        }
-                    }
-                }
-                Some(())
-            }
-            Terminator::Unreachable { span: _ } => {
-                self.builder.build_unreachable();
-                Some(())
-            }
-            Terminator::Switch { discr, targets, span: _ } => {
-                self.compile_switch(discr, targets)
-            }
-        }
-    }
-    
-    // 编译 switch 语句
-    fn compile_switch(&mut self, discr: &Operand, targets: &SwitchTargets) -> Option<()> {
-        let discr_val = self.compile_operand(discr)?.into_int_value();
-        let otherwise_bb = *self.basic_blocks.get(&targets.otherwise)?;
-        
-        // Prepare the cases as a vector of tuples (case_value, target_basic_block)
-        let cases: Vec<_> = targets.values.iter()
-            .zip(&targets.targets) // Combine values and targets
-            .filter_map(|(&value, &bb_id)| {
-                // Look up the LLVM BasicBlock for each BasicBlockId
-                self.basic_blocks.get(&bb_id).map(|&bb| {
-                    let case_val = discr_val.get_type().const_int(value.try_into().unwrap(), false);
-                    (case_val, bb)
-                })
-            })
-            .collect();
-        
-        // Build the switch with all cases provided at once
-        let switch_result = self.builder.build_switch(
-            discr_val,
-            otherwise_bb,
-            &cases, // Pass the prepared cases slice
-        );
-    
-        // Handle the Result, typically you'd use `?` or `expect` here
-        match switch_result {
-            Ok(_) => Some(()),
-            Err(e) => {
-                eprintln!("Failed to build switch instruction: {:?}", e);
-                None
-            }
-        }
-    }
-    
-    // 编译局部变量访问
-    fn compile_local(&mut self, local_id: LocalId) -> Option<BasicValueEnum<'ctx>> {
-        let ptr = self.local_vars.get(&local_id)?;
-        let ty = self.local_types.get(&local_id)?;
-        
-        if let Some(value_type) = self.get_value_type(ty.clone()) {
-            Some(self.builder.build_load(value_type, *ptr, &format!("load_{}", local_id.0)).unwrap().into())
-        } else {
-            None
-        }
+    /// 声明结构体类型（不透明声明，后续填充）
+    fn declare_struct(&mut self, mir_struct: &MirStruct) {
+        let struct_name = self.get_def_id_name(mir_struct.def_id);
+        let struct_ty = self.context.opaque_struct_type(&struct_name);
+        self.struct_types.insert(mir_struct.def_id, struct_ty);
     }
 
-    /// 编译 MIR 语句
-    fn compile_statement(&mut self, statement: &Statement) -> Option<()> {
-        match statement {
-            Statement::Assign { dest, rvalue, span: _ } => {
-                // 1. 编译右侧表达式，获取其值
-                let rvalue_val = self.compile_rvalue(rvalue)?;
-                
-                // 2. 获取目标局部变量的内存指针
-                if let Some(dest_ptr) = self.local_vars.get(dest) {
-                    // 3. 生成 LLVM store 指令，将右值存入左值位置
-                    self.builder.build_store(*dest_ptr, rvalue_val);
-                    Some(())
-                } else {
-                    eprintln!("Error: Local variable {:?} not found", dest);
-                    None
-                }
-            }
-            // 未来可以扩展其他语句类型，例如：
-            // Statement::StorageLive(local) => { ... }
-            // Statement::StorageDead(local) => { ... }
-        }
-    }
+    /// 编译为可执行文件（消耗 self）
+    pub fn compile_to_binary(self, output_path: &Path) -> Result<(), String> {
+        // 1. 生成临时目标文件
+        let temp_dir = std::env::temp_dir();
+        let obj_file = temp_dir.join(format!("temp_{}.o", std::process::id()));
 
-    fn compile_binop_enhanced(
-        &self, 
-        op: BinOp, 
-        lhs: BasicValueEnum<'ctx>, 
-        rhs: BasicValueEnum<'ctx>,
-        lhs_ty: &Ty,
-        rhs_ty: &Ty
-    ) -> Option<BasicValueEnum<'ctx>> {
-        match (lhs, rhs) {
-            (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
-                let is_signed = self.is_signed_int(lhs_ty) || self.is_signed_int(rhs_ty);
+        self.write_object_file(&obj_file)?;
 
-                Some(match op {
-                    BinOp::Add => {
-                        // LLVM 的整数加法本身不区分有符号和无符号
-                        // 使用 build_int_add 即可
-                        self.builder.build_int_add(l, r, "add").unwrap().into()
-                    }
-                    BinOp::Sub => {
-                        // LLVM 的整数减法本身不区分有符号和无符号  
-                        // 使用 build_int_sub 即可
-                        self.builder.build_int_sub(l, r, "sub").unwrap().into()
-                    }
-                    BinOp::Mul => {
-                        // LLVM 的整数乘法本身不区分有符号和无符号
-                        // 使用 build_int_mul 即可
-                        self.builder.build_int_mul(l, r, "mul").unwrap().into()
-                    }
-                    BinOp::Div => {
-                        if is_signed {
-                            self.builder.build_int_signed_div(l, r, "sdiv").unwrap().into()
-                        } else {
-                            self.builder.build_int_unsigned_div(l, r, "udiv").unwrap().into()
-                        }
-                    }
-                    BinOp::Rem => {
-                        if is_signed {
-                            self.builder.build_int_signed_rem(l, r, "srem").unwrap().into()
-                        } else {
-                            self.builder.build_int_unsigned_rem(l, r, "urem").unwrap().into()
-                        }
-                    }
-                    // 比较运算需要根据符号性选择正确的谓词
-                    BinOp::Lt => {
-                        let predicate = if is_signed { IntPredicate::SLT } else { IntPredicate::ULT };
-                        self.builder.build_int_compare(predicate, l, r, "lt").unwrap().into()
-                    }
-                    BinOp::Le => {
-                        let predicate = if is_signed { IntPredicate::SLE } else { IntPredicate::ULE };
-                        self.builder.build_int_compare(predicate, l, r, "le").unwrap().into()
-                    }
-                    BinOp::Gt => {
-                        let predicate = if is_signed { IntPredicate::SGT } else { IntPredicate::UGT };
-                        self.builder.build_int_compare(predicate, l, r, "gt").unwrap().into()
-                    }
-                    BinOp::Ge => {
-                        let predicate = if is_signed { IntPredicate::SGE } else { IntPredicate::UGE };
-                        self.builder.build_int_compare(predicate, l, r, "ge").unwrap().into()
-                    }
-                    // 这些运算与符号性无关
-                    BinOp::Eq => self.builder.build_int_compare(IntPredicate::EQ, l, r, "eq").unwrap().into(),
-                    BinOp::Ne => self.builder.build_int_compare(IntPredicate::NE, l, r, "ne").unwrap().into(),
-                    BinOp::And => self.builder.build_and(l, r, "and").unwrap().into(),
-                    BinOp::Or => self.builder.build_or(l, r, "or").unwrap().into(),
-                })
-            }
-            // 浮点数运算
-            (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => {
-                Some(match op {
-                    BinOp::Add => self.builder.build_float_add(l, r, "fadd").unwrap().into(),
-                    BinOp::Sub => self.builder.build_float_sub(l, r, "fsub").unwrap().into(),
-                    BinOp::Mul => self.builder.build_float_mul(l, r, "fmul").unwrap().into(),
-                    BinOp::Div => self.builder.build_float_div(l, r, "fdiv").unwrap().into(),
-                    BinOp::Rem => self.builder.build_float_rem(l, r, "frem").unwrap().into(),
-                    BinOp::Eq => self.builder.build_float_compare(FloatPredicate::OEQ, l, r, "feq").unwrap().into(),
-                    BinOp::Ne => self.builder.build_float_compare(FloatPredicate::ONE, l, r, "fne").unwrap().into(),
-                    BinOp::Lt => self.builder.build_float_compare(FloatPredicate::OLT, l, r, "flt").unwrap().into(),
-                    BinOp::Le => self.builder.build_float_compare(FloatPredicate::OLE, l, r, "fle").unwrap().into(),
-                    BinOp::Gt => self.builder.build_float_compare(FloatPredicate::OGT, l, r, "fgt").unwrap().into(),
-                    BinOp::Ge => self.builder.build_float_compare(FloatPredicate::OGE, l, r, "fge").unwrap().into(),
-                    _ => {
-                        eprintln!("Warning: Operation {:?} not supported for floats", op);
-                        return None;
-                    }
-                })
-            }
-            // 其他情况回退到基础版本
-            _ => {
-                eprintln!("Warning: Unsupported operand types for binary operation");
-                return None;
-            }
-        }
-    }
+        let linker = Linker::new().map_err(|e| format!("连接器初始失败: {}", e))?;
 
-    // 辅助函数：判断整数类型是否有符号
-    fn is_signed_int(&self, ty: &Ty) -> bool {
-        matches!(ty, 
-            Ty::Int(IntKind::I8 | IntKind::I16 | IntKind::I32 | 
-                    IntKind::I64 | IntKind::I128 | IntKind::Isize)
-        )
-    }
+        linker
+            .link_executable(&obj_file, output_path)
+            .map_err(|e| format!("链接失败: {}", e))?;
 
-    fn get_operand_type(&self, operand: &Operand) -> Option<Ty> {
-        match operand {
-            Operand::Literal(literal) => Some(self.get_literal_type(literal)),
-            Operand::Local(local_id) => self.local_types.get(local_id).cloned(),
-            Operand::Static(def_id) => {
-                eprintln!("Warning: Static operand type lookup not yet implemented for {:?}", def_id);
-                // 处理静态变量类型
-                None // 需要根据你的实现来完善
-            }
-        }
-    }
+        let _ = std::fs::remove_file(&obj_file);
 
-    fn get_literal_type(&self, literal: &Literal) -> Ty {
-        match literal {
-            Literal::I8(_) => Ty::Int(IntKind::I8),
-            Literal::I16(_) => Ty::Int(IntKind::I16),
-            Literal::I32(_) => Ty::Int(IntKind::I32),
-            Literal::I64(_) => Ty::Int(IntKind::I64),
-            Literal::I128(_) => Ty::Int(IntKind::I128),
-            Literal::U8(_) => Ty::Int(IntKind::U8),
-            Literal::U16(_) => Ty::Int(IntKind::U16),
-            Literal::U32(_) => Ty::Int(IntKind::U32),
-            Literal::U64(_) => Ty::Int(IntKind::U64),
-            Literal::U128(_) => Ty::Int(IntKind::U128),
-            Literal::F32(_) => Ty::Float(FloatKind::F32),
-            Literal::F64(_) => Ty::Float(FloatKind::F64),
-            Literal::Bool(_) => Ty::Bool,
-            Literal::Unit => Ty::Unit,
-            Literal::Never => Ty::Never,
-            Literal::Str(_) => Ty::Str,
-            Literal::Char(_) => {
-                // 字符类型 - 通常用 i8 或 i32 表示
-                Ty::Int(IntKind::I32)
-            }
-            Literal::Isize(_) => Ty::Int(IntKind::Isize),
-            Literal::Usize(_) => Ty::Int(IntKind::Usize),
-        }
-    }
-
-    fn compile_unop_enhanced(
-        &self, 
-        op: UnOp, 
-        operand: BasicValueEnum<'ctx>,
-        operand_ty: &Ty
-    ) -> Option<BasicValueEnum<'ctx>> {
-        match op {
-            UnOp::Not => {
-                // 逻辑非运算只支持整数和布尔类型
-                if !self.is_valid_for_not(operand_ty) {
-                    eprintln!("Warning: Not operation not supported for type {:?}", operand_ty);
-                    return None;
-                }
-                
-                match operand {
-                    BasicValueEnum::IntValue(val) => {
-                        Some(self.builder.build_not(val, "not").unwrap().into())
-                    }
-                    _ => {
-                        eprintln!("Warning: Unexpected operand type for Not operation");
-                        None
-                    }
-                }
-            }
-            UnOp::Neg => {
-                // 算术取负运算只支持数值类型
-                if !self.is_valid_for_neg(operand_ty) {
-                    eprintln!("Warning: Negation not supported for type {:?}", operand_ty);
-                    return None;
-                }
-                
-                match operand {
-                    BasicValueEnum::IntValue(val) => {
-                        Some(self.builder.build_int_neg(val, "neg").unwrap().into())
-                    }
-                    BasicValueEnum::FloatValue(val) => {
-                        Some(self.builder.build_float_neg(val, "fneg").unwrap().into())
-                    }
-                    _ => {
-                        eprintln!("Warning: Unexpected operand type for Negation");
-                        None
-                    }
-                }
-            }
-        }
-    }
-    
-    // 辅助函数：检查类型是否支持逻辑非运算
-    fn is_valid_for_not(&self, ty: &Ty) -> bool {
-        matches!(ty, 
-            Ty::Int(_) | Ty::Bool
-        )
-    }
-    
-    // 辅助函数：检查类型是否支持算术取负运算
-    fn is_valid_for_neg(&self, ty: &Ty) -> bool {
-        matches!(ty, 
-            Ty::Int(_) | Ty::Float(_)
-        )
-    }
-
-    /// 编译右侧值 (Rvalue)
-    fn compile_rvalue(&mut self, rvalue: &Rvalue) -> Option<BasicValueEnum<'ctx>> {
-        match rvalue {
-            Rvalue::Use(operand) => {
-                // 直接使用操作数的值
-                self.compile_operand(operand)
-            }
-            Rvalue::Binary(op, lhs, rhs) => {
-                // 编译二元操作
-                let lhs_val = self.compile_operand(lhs)?;
-                let rhs_val = self.compile_operand(rhs)?;
-                self.compile_binop_enhanced(*op, lhs_val, rhs_val, &self.get_operand_type(lhs).expect("unknow operand"), &self.get_operand_type(rhs).expect("unknow operand"))
-            }
-            Rvalue::Unary(op, operand) => {
-                // 编译一元操作
-                let operand_val = self.compile_operand(operand)?;
-                self.compile_unop_enhanced(*op, operand_val, &self.get_operand_type(operand).expect("unknow operand"))
-            }
-            Rvalue::Ref(_, place) => {
-                // 取地址操作：获取地值（Place）的指针
-                self.compile_place(place).map(|ptr| ptr.into())
-            }
-            // 注意：此处需要根据你的 MIR 定义，处理 Rvalue 的其他变体，例如：
-            // Rvalue::CheckedBinary, Rvalue::Aggregate, Rvalue::Len 等。
-            _ => {
-                eprintln!("Warning: Rvalue variant {:?} not yet implemented", rvalue);
-                None
-            }
-        }
-    }
-
-    /// 编译地值 (Place) 以获取指针
-    fn compile_place(&mut self, place: &Place) -> Option<PointerValue<'ctx>> {
-        // 这里是一个基础实现，仅处理基位置，未处理投影（索引、字段等）
-        match &place.base {
-            PlaceBase::Local(local_id) => {
-                // 从局部变量映射中获取已分配的内存指针
-                self.local_vars.get(local_id).copied()
-            }
-            PlaceBase::Static(def_id) => {
-                // 处理静态变量
-                eprintln!("Warning: Static place not yet implemented: {:?}", def_id);
-                None
-            }
-        }
-        // 注意：一个完整的实现还需要处理 `place.projections`（例如 Deref, Field, Index）
-        // 以计算最终的内存地址。
-    }
-    
-    // 主编译函数
-    pub fn compile_function(&mut self, mir_func: &MirFunction) -> Option<FunctionValue<'ctx>> {
-        // 清理状态
-        self.local_vars.clear();
-        self.basic_blocks.clear();
-        self.local_types.clear();
-        
-        // 1. 准备函数类型
-        let return_ty = if let Some(first_local) = mir_func.locals.first() {
-            &first_local.ty
-        } else {
-            &Ty::Unit
-        };
-        
-        let fn_type = self.get_return_type(return_ty);
-        let function = self.module.add_function(&format!("fn_{}_{:?}", mir_func.def_id.index, mir_func.def_id.kind), fn_type, None);
-        
-        // 2. 创建基本块
-        for bb in &mir_func.basic_blocks {
-            let llvm_bb = self.context.append_basic_block(function, &format!("bb_{}", bb.id.0));
-            self.basic_blocks.insert(bb.id, llvm_bb);
-        }
-        
-        // 3. 设置入口块
-        let entry_bb = self.basic_blocks.get(&BasicBlockId(0))?;
-        self.builder.position_at_end(*entry_bb);
-        
-        // 4. 分配局部变量
-        for (i, local) in mir_func.locals.iter().enumerate() {
-            let local_id = LocalId(i);
-            self.local_types.insert(local_id, local.ty.clone());
-            
-            if self.is_valid_variable_type(&local.ty) {
-                if let Some(value_type) = self.get_value_type(local.ty.clone()) {
-                    let alloca = self.builder.build_alloca(value_type, &format!("local_{}", i))
-                        .expect("Failed to allocate local variable");
-                    self.local_vars.insert(local_id, alloca);
-                }
-            }
-        }
-        
-        // 5. 编译所有基本块
-        for bb in &mir_func.basic_blocks {
-            if let Some(llvm_bb) = self.basic_blocks.get(&bb.id) {
-                self.builder.position_at_end(*llvm_bb);
-                
-                // 编译语句
-                for statement in &bb.statements {
-                    self.compile_statement(statement);
-                }
-                
-                // 编译终结符
-                if let Some(terminator) = &bb.terminator {
-                    self.compile_terminator(terminator, return_ty);
-                }
-            }
-        }
-        
-        // 调用 verify 方法，并传入 bool 参数
-        let is_valid = function.verify(true); // 传入 true，验证失败时打印信息
-
-        if !is_valid {
-            eprintln!("Function verification failed for: {:?}", mir_func.def_id);
-            // 可以考虑在这里处理错误，例如返回 None 或记录日志
-            return None;
-        }
-        
-        Some(function)
-    }
-}
-
-impl<'ctx> CodeGen<'ctx> {
-    /// 直接生成二进制代码并返回字节向量
-    pub fn compile_to_binary(&self) -> Result<Vec<u8>, String> {
-        // 1. 初始化 LLVM 目标平台
-        Self::initialize_targets();
-        
-        // 2. 获取当前主机目标三元组
-        let target_triple = TargetMachine::get_default_triple();
-        let target = Target::from_triple(&target_triple)
-            .map_err(|e| format!("Failed to get target: {}", e))?;
-        
-        // 3. 创建目标机器
-        let cpu = TargetMachine::get_host_cpu_name().to_string();
-        let features = TargetMachine::get_host_cpu_features().to_string();
-        
-        let target_machine = target.create_target_machine(
-            &target_triple,
-            &cpu,
-            &features,
-            OptimizationLevel::Default,
-            RelocMode::Default,
-            CodeModel::Default,
-        ).ok_or("Failed to create target machine")?;
-        
-        // 4. 将模块转换为内存中的二进制
-        let memory_buffer = target_machine
-            .write_to_memory_buffer(&self.module, FileType::Object)
-            .map_err(|e| format!("Failed to write object file: {}", e))?;
-        
-        // 5. 提取二进制数据
-        let binary_data = unsafe {
-            std::slice::from_raw_parts(
-                memory_buffer.as_slice().as_ptr() as *const u8,
-                memory_buffer.as_slice().len()
-            ).to_vec()
-        };
-        
-        Ok(binary_data)
-    }
-    
-    /// 生成可执行文件
-    pub fn compile_to_executable(&self, output_path: &Path) -> Result<(), String> {
-        Self::initialize_targets();
-        
-        let target_triple = TargetMachine::get_default_triple();
-        let target = Target::from_triple(&target_triple)
-            .map_err(|e| format!("Failed to get target: {}", e))?;
-        
-        let cpu = TargetMachine::get_host_cpu_name().to_string();
-        let features = TargetMachine::get_host_cpu_features().to_string();
-        
-        let target_machine = target.create_target_machine(
-            &target_triple,
-            &cpu,
-            &features,
-            OptimizationLevel::Default,
-            RelocMode::Default,
-            CodeModel::Default,
-        ).ok_or("Failed to create target machine")?;
-        
-        target_machine
-            .write_to_file(&self.module, FileType::Object, output_path)
-            .map_err(|e| format!("Failed to write executable: {}", e))?;
-        
         Ok(())
     }
-    
-    /// 初始化 LLVM 目标平台
-    fn initialize_targets() {
+
+    /// 仅生成目标文件
+    fn write_object_file(&self, path: &Path) -> Result<(), String> {
         Target::initialize_all(&InitializationConfig::default());
+
+        let triple = TargetMachine::get_default_triple();
+        let target =
+            Target::from_triple(&triple).map_err(|e| format!("Invalid target triple: {}", e))?;
+
+        let machine = target
+            .create_target_machine(
+                &triple,
+                "generic",
+                "",
+                inkwell::OptimizationLevel::Default,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .ok_or("Failed to create target machine")?;
+
+        machine
+            .write_to_file(&self.module, FileType::Object, path)
+            .map_err(|e| format!("Failed to write object file: {}", e))
     }
-    
-    pub fn compile_to_assembly(&self) -> Result<String, String> {
-        Self::initialize_targets();
-        
-        let target_triple = TargetMachine::get_default_triple();
-        let target = Target::from_triple(&target_triple)
-            .map_err(|e| format!("Failed to get target: {}", e))?;
-        
-        let cpu = TargetMachine::get_host_cpu_name().to_string();
-        let features = TargetMachine::get_host_cpu_features().to_string();
-        
-        let target_machine = target.create_target_machine(
-            &target_triple,
-            &cpu,
-            &features,
-            OptimizationLevel::Default,
-            RelocMode::Default,
-            CodeModel::Default,
-        ).ok_or("Failed to create target machine")?;
 
-        // 使用内存缓冲区获取汇编代码
-        let memory_buffer = target_machine
-            .write_to_memory_buffer(&self.module, FileType::Assembly)
-            .map_err(|e| format!("Failed to generate assembly: {}", e))?;
-
-        // 转换为字符串
-        let assembly = String::from_utf8(memory_buffer.as_slice().to_vec())
-            .map_err(|e| format!("Failed to convert assembly to UTF-8 string: {}", e))?;
-
-        Ok(assembly)
+    /// 打印 LLVM IR（调试用）
+    pub fn get_llvm_ir(&self) -> String {
+        self.module.to_string()
     }
-}
 
-pub fn codegen(mir: Vec<MirFunction>, name: &str) -> Result<Vec<u8>, String> {
-    let context = Context::create();
-    let mut codegen = CodeGen::new(&context, name);
+    fn generate_c_function(&mut self, builtin_function: BuiltinFunction) {
+        let fn_name = get_global_string(builtin_function.name).unwrap();
+        let ret_type = self.mir_type_to_llvm_type(&builtin_function.ret);
 
-    println!("🔧 开始代码生成，共 {} 个函数", mir.len());
+        let param_types: Vec<BasicMetadataTypeEnum<'ctx>> = builtin_function
+            .params
+            .iter()
+            .map(|param| self.mir_type_to_llvm_type(&param.ty).into())
+            .collect();
 
-    for (i, function) in mir.iter().enumerate() {
-        println!("📋 编译第 {} 个函数: {:?}", i + 1, function.def_id);
-        
-        match codegen.compile_function(function) {
-            Some(_) => println!("✅ 函数编译成功"),
-            None => {
-                eprintln!("❌ 函数编译失败: {:?}", function.def_id);
-                // 打印更多调试信息
-                eprintln!("   基本块数量: {}", function.basic_blocks.len());
-                eprintln!("   局部变量数量: {}", function.locals.len());
-                return Err(format!("无法编译函数: {:?}", function.def_id).into());
+        let fn_type = ret_type.fn_type(&param_types, builtin_function.is_variadic);
+        let function = self
+            .module
+            .add_function(&fn_name, fn_type, Some(Linkage::External));
+        self.value_map.insert(builtin_function.def_id, function);
+    }
+
+    fn generate_item(&mut self, item: MirItem) {
+        match item {
+            MirItem::Function(mir_function) => self.generate_function(mir_function),
+            MirItem::Struct(mir_struct) => self.generate_struct(mir_struct),
+            MirItem::Use(mir_use) => self.generate_use(mir_use),
+            MirItem::Module(mir_module) => self.generate_module(mir_module),
+            MirItem::Extern(mir_extern) => self.generate_extern(mir_extern),
+        }
+    }
+
+    fn generate_struct(&mut self, mir_struct: MirStruct) {
+        // 获取或创建结构体类型
+        let struct_ty = *self.struct_types.get(&mir_struct.def_id).unwrap();
+
+        // 设置结构体字段
+        let field_types: Vec<_> = mir_struct
+            .fields
+            .iter()
+            .map(|field| self.mir_type_to_llvm_type(&field.ty))
+            .collect();
+
+        struct_ty.set_body(&field_types, false);
+    }
+
+    fn generate_use(&mut self, mir_use: MirUse) {
+        let _ = mir_use;
+    }
+
+    fn generate_module(&mut self, mir_module: MirModule) {
+        for item in mir_module.items {
+            self.generate_item(item);
+        }
+    }
+
+    fn generate_extern(&mut self, mir_extern: MirExtern) {
+        for item in mir_extern.items {
+            match item {
+                MirExternItem::Function(func) => {
+                    self.generate_extern_function(func, &mir_extern.abi);
+                }
             }
         }
     }
 
-    // 验证模块
-    println!("🔍 验证LLVM模块...");
-    if let Err(e) = codegen.module.verify() {
-        eprintln!("❌ 模块验证失败: {}", e);
-        // 打印模块内容用于调试
-        let ir = codegen.module.print_to_string();
-        eprintln!("生成的LLVM IR:\n{}", ir);
-        return Err(format!("模块验证失败: {}", e).into());
+    fn generate_extern_function(&mut self, func: MirExternFunction, abi: &AbiType) {
+        if *abi == AbiType::Lite {
+            return;
+        }
+        let name = get_global_string(func.name).unwrap();
+
+        let linkage = Linkage::External;
+
+        let ret_ty = match &func.return_ty {
+            Some(ty) => self.mir_type_to_llvm_type(ty),
+            None => self.context.struct_type(&[], false).into(),
+        };
+
+        let param_types: Vec<_> = func
+            .params
+            .iter()
+            .map(|p| self.mir_type_to_llvm_type(&p.ty).into())
+            .collect();
+
+        let fn_type = if func.return_ty.is_some() {
+            ret_ty.fn_type(&param_types, false)
+        } else {
+            self.context.void_type().fn_type(&param_types, false)
+        };
+
+        let function = self
+            .module
+            .add_function(name.as_ref(), fn_type, Some(linkage));
+
+        self.value_map.insert(func.def_id, function);
     }
 
-    println!("✅ 模块验证成功");
+    fn generate_function(&mut self, mir_function: MirFunction) {
+        let fn_name = self.get_def_id_name(mir_function.def_id);
+        self.is_main = fn_name == "main";
 
-    // 生成二进制
-    codegen.compile_to_binary()
+        // 特殊处理 main 的签名
+        let (llvm_ret_ty, llvm_params) = if self.is_main {
+            let ret_ty = self.context.i32_type().into();
+            let params: Vec<BasicMetadataTypeEnum<'ctx>> = if mir_function.args.is_empty() {
+                vec![]
+            } else {
+                vec![
+                    self.context.i32_type().into(),
+                    self.context.ptr_type(AddressSpace::default()).into(),
+                ]
+            };
+            (ret_ty, params)
+        } else {
+            let ret_ty = self.mir_type_to_llvm_type(&mir_function.return_ty);
+            let params: Vec<_> = mir_function
+                .args
+                .iter()
+                .map(|param| {
+                    let local_decl = &mir_function.local_decls[param.0];
+                    self.mir_type_to_llvm_type(&local_decl.ty).into()
+                })
+                .collect();
+            (ret_ty, params)
+        };
+
+        let fn_type = llvm_ret_ty.fn_type(&llvm_params, false);
+        let function = self
+            .module
+            .add_function(&fn_name, fn_type, Some(Linkage::External));
+
+        self.value_map.insert(mir_function.def_id, function);
+        self.current_function = Some(function);
+        self.current_function_def_id = Some(mir_function.def_id);
+        self.current_function_decls = mir_function.local_decls.clone();
+        self.locals.clear();
+
+        let entry_block = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry_block);
+
+        // 分配局部变量并存储符号信息
+        for (i, local_decl) in mir_function.local_decls.iter().enumerate() {
+            let ty = self.mir_type_to_llvm_type(&local_decl.ty);
+            let is_signed = self.is_signed_type(&local_decl.ty);
+            let align = self.get_type_align(ty);
+
+            let ptr = self
+                .builder
+                .build_alloca(
+                    ty,
+                    &format!(
+                        "local_{}",
+                        match local_decl.name {
+                            Some(string_id) =>
+                                get_global_string(string_id).unwrap().as_ref().to_string(),
+                            None => i.to_string(),
+                        }
+                    ),
+                )
+                .unwrap();
+
+            // 设置对齐
+            if let Some(inst) = ptr.as_instruction() {
+                match inst.set_alignment(align) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        self.diagnostics.push(
+                            error(format!("对齐失败 {}", err.to_string()))
+                                .with_span(mir_function.span)
+                                .build(),
+                        );
+                        return;
+                    }
+                }
+            }
+
+            self.locals.insert(
+                Local(i),
+                PointerInfo {
+                    ptr,
+                    pointee_ty: ty,
+                    is_signed,
+                },
+            );
+        }
+
+        // 存储参数
+        for (i, param_local) in mir_function.args.iter().enumerate() {
+            let param = function.get_nth_param(i as u32).unwrap();
+            let info = self.locals.get(param_local).unwrap();
+            let store = self.builder.build_store(info.ptr, param).unwrap();
+            match store.set_alignment(self.get_type_align(info.pointee_ty)) {
+                Ok(_) => {}
+                Err(err) => {
+                    self.diagnostics.push(
+                        error(format!("对齐失败 {}", err.to_string()))
+                            .with_span(mir_function.span)
+                            .build(),
+                    );
+                    return;
+                }
+            }
+        }
+
+        // 创建基本块
+        let mut block_map = FxHashMap::default();
+        for i in 0..mir_function.basic_blocks.len() {
+            let block = self
+                .context
+                .append_basic_block(function, &format!("basic_block_{}", i));
+            block_map.insert(i, block);
+        }
+
+        if let Some(first) = block_map.get(&0) {
+            self.builder.build_unconditional_branch(*first).unwrap();
+        }
+
+        for (i, mir_block) in mir_function.basic_blocks.iter().enumerate() {
+            let block = block_map[&i];
+            self.builder.position_at_end(block);
+            self.generate_basic_block(mir_block, &block_map);
+        }
+    }
+
+    fn get_type_align(&self, ty: BasicTypeEnum<'ctx>) -> u32 {
+        match ty {
+            t if t.is_int_type() => {
+                let bits = t.into_int_type().get_bit_width();
+                ((bits / 8).next_power_of_two()).max(1) as u32
+            }
+            t if t.is_float_type() => {
+                if t.into_float_type() == self.context.f32_type() {
+                    4
+                } else {
+                    8
+                }
+            }
+            t if t.is_pointer_type() => 8,
+            t if t.is_array_type() => {
+                let elem_ty = t.into_array_type().get_element_type();
+                self.get_type_align(elem_ty)
+            }
+            t if t.is_struct_type() => {
+                let struct_ty = t.into_struct_type();
+                (0..struct_ty.get_field_types().len())
+                    .map(|i| {
+                        self.get_type_align(struct_ty.get_field_type_at_index(i as u32).unwrap())
+                    })
+                    .max()
+                    .unwrap_or(1)
+            }
+            _ => 8,
+        }
+    }
+
+    fn generate_basic_block(
+        &mut self,
+        mir_block: &BasicBlock,
+        block_map: &FxHashMap<usize, inkwell::basic_block::BasicBlock<'ctx>>,
+    ) {
+        for statement in &mir_block.statements {
+            self.generate_statement(statement);
+        }
+        self.generate_terminator(&mir_block.terminator, block_map);
+    }
+
+    fn generate_statement(&mut self, statement: &Statement) {
+        match &statement.kind {
+            StatementKind::Assign { place, rvalue } => {
+                let addr = self.emit_place_address(place);
+                let value = self.emit_rvalue(rvalue, Some(&place.ty));
+                self.builder.build_store(addr, value).unwrap();
+            }
+            StatementKind::Nop => {}
+        }
+    }
+
+    fn generate_terminator(
+        &mut self,
+        terminator: &Terminator,
+        block_map: &FxHashMap<usize, inkwell::basic_block::BasicBlock<'ctx>>,
+    ) {
+        match &terminator.kind {
+            TerminatorKind::Return { value, is_explicit } => {
+                if self.is_main && !is_explicit {
+                    let value = self.context.i32_type().const_int(0, false);
+                    self.builder.build_return(Some(&value)).unwrap();
+                    return;
+                }
+                let operand_val = self.emit_operand(value);
+                self.builder.build_return(Some(&operand_val)).unwrap();
+            }
+            TerminatorKind::Goto { target } => {
+                let target_block = block_map[&target.0];
+                self.builder
+                    .build_unconditional_branch(target_block)
+                    .unwrap();
+            }
+            TerminatorKind::SwitchInt { discr, targets } => {
+                let discr_val = self.emit_operand(discr).into_int_value();
+                let otherwise_block = block_map[&targets.otherwise.0];
+
+                let cases: Vec<_> = targets
+                    .values
+                    .iter()
+                    .zip(targets.targets.iter())
+                    .map(|(val, target)| {
+                        let llvm_val = self.context.i64_type().const_int(*val as u64, false);
+                        (llvm_val, block_map[&target.0])
+                    })
+                    .collect();
+
+                self.builder
+                    .build_switch(discr_val, otherwise_block, &cases)
+                    .unwrap();
+            }
+            TerminatorKind::Call {
+                function,
+                args,
+                destination,
+                target,
+            } => {
+                let function_val = match self.value_map.get(&function).copied() {
+                    Some(function) => function,
+                    None => {
+                        self.diagnostics.push(
+                            error(format!("未知函数 {}", self.get_def_id_name(*function)))
+                                .with_span(terminator.span)
+                                .build(),
+                        );
+                        return;
+                    }
+                };
+
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for arg in args {
+                    let val = self.emit_operand(arg);
+                    arg_vals.push(val.into());
+                }
+
+                let call_site = self
+                    .builder
+                    .build_call(function_val, &arg_vals, "call")
+                    .unwrap();
+
+                let dest_addr = self.emit_place_address(destination);
+                match call_site.try_as_basic_value() {
+                    ValueKind::Basic(basic_value) => {
+                        self.builder.build_store(dest_addr, basic_value).unwrap();
+                    }
+                    ValueKind::Instruction(_) => {}
+                }
+
+                let next_block = block_map[&target.0];
+                self.builder.build_unconditional_branch(next_block).unwrap();
+            }
+        }
+    }
+
+    /// 统一处理 Place
+    fn emit_place_address(&mut self, place: &Place) -> PointerValue<'ctx> {
+        let base = *self.locals.get(&place.local).unwrap();
+
+        // 检查是否以 Deref 开头
+        if let Some(PlaceElem::Deref) = place.projection.first() {
+            // 加载指针值，得到目标地址
+            let ptr_val = self
+                .builder
+                .build_load(base.pointee_ty, base.ptr, "ptr_val")
+                .unwrap()
+                .into_pointer_value();
+
+            // 处理剩余投影
+            self.apply_projection(ptr_val, &place.projection[1..], place.local)
+        } else {
+            // 普通变量
+            self.apply_projection(base.ptr, &place.projection, place.local)
+        }
+    }
+
+    /// 应用投影（Field, Index 等）
+    fn apply_projection(
+        &mut self,
+        base_ptr: PointerValue<'ctx>,
+        projection: &[PlaceElem],
+        base_local: Local,
+    ) -> PointerValue<'ctx> {
+        let mut current_ptr = base_ptr;
+        let mut current_mir_ty = self.get_local_ty(base_local);
+
+        for elem in projection {
+            match elem {
+                PlaceElem::Field(field) => {
+                    let struct_ty = self
+                        .mir_type_to_llvm_type(&current_mir_ty)
+                        .into_struct_type();
+
+                    current_ptr = self
+                        .builder
+                        .build_struct_gep(
+                            struct_ty,
+                            current_ptr,
+                            field.index as u32,
+                            &format!("field_{}", field.index),
+                        )
+                        .unwrap();
+                    // 更新 current_mir_ty 为字段类型
+                    current_mir_ty = field.ty.clone();
+                }
+                PlaceElem::Index(local) => {
+                    let index_info = self.locals.get(local).unwrap();
+                    let index_val = self
+                        .builder
+                        .build_load(index_info.pointee_ty, index_info.ptr, "index")
+                        .unwrap()
+                        .into_int_value();
+
+                    let array_ty = self.mir_type_to_llvm_type(&current_mir_ty);
+
+                    current_ptr = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                array_ty,
+                                current_ptr,
+                                &[self.context.i32_type().const_int(0, false), index_val],
+                                "elem",
+                            )
+                            .unwrap()
+                    };
+                    current_mir_ty = self.get_element_ty(&current_mir_ty);
+                }
+                PlaceElem::ConstantIndex { offset, .. } => {
+                    let index_val = self.context.i64_type().const_int(*offset as u64, false);
+                    let array_ty = self.mir_type_to_llvm_type(&current_mir_ty);
+
+                    current_ptr = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                array_ty,
+                                current_ptr,
+                                &[self.context.i32_type().const_int(0, false), index_val],
+                                &format!("const_index_{}", offset),
+                            )
+                            .unwrap()
+                    };
+                    current_mir_ty = self.get_element_ty(&current_mir_ty);
+                }
+                PlaceElem::Deref => {
+                    let loaded = self
+                        .builder
+                        .build_load(
+                            self.mir_type_to_llvm_type(&current_mir_ty),
+                            current_ptr,
+                            "deref",
+                        )
+                        .unwrap();
+                    current_ptr = loaded.into_pointer_value();
+                    current_mir_ty = self.get_pointee_ty(&current_mir_ty);
+                }
+            }
+        }
+
+        current_ptr
+    }
+
+    fn get_local_ty(&self, local: Local) -> Ty {
+        self.current_function_decls
+            .get(local.0)
+            .map(|decl| decl.ty.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "Local {} not found, len={}",
+                    local.0,
+                    self.current_function_decls.len()
+                )
+            })
+    }
+
+    fn get_element_ty(&self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::Array { element, .. } => element.clone().as_ref().clone(),
+            Ty::Ptr(to) | Ty::Ref { to, .. } => *to.clone(),
+            _ => panic!("not an array or pointer type"),
+        }
+    }
+
+    fn emit_rvalue(&mut self, rvalue: &Rvalue, target_ty: Option<&Ty>) -> BasicValueEnum<'ctx> {
+        match rvalue {
+            Rvalue::Use(operand) => self.emit_operand(operand),
+            Rvalue::BinaryOp(op, left, right) => {
+                let left_val = self.emit_operand(left);
+                let right_val = self.emit_operand(right);
+                let left_info = self.get_operand_type_info(left);
+                let right_info = self.get_operand_type_info(right);
+                self.emit_binary_op(*op, left_val, right_val, left_info, right_info)
+            }
+            Rvalue::UnaryOp(op, operand) => {
+                let val = self.emit_operand(operand);
+                self.emit_unary_op(*op, val)
+            }
+            Rvalue::Ref(_, place) => {
+                let addr = self.emit_place_address(place);
+                addr.into()
+            }
+            Rvalue::Deref(place) => {
+                // Deref 作为右值：加载值
+                let addr = self.emit_place_address(place);
+                let ty = self.mir_type_to_llvm_type(&place.ty);
+                self.builder.build_load(ty, addr, "deref_load").unwrap()
+            }
+            Rvalue::AddressOf(place) => {
+                let addr = self.emit_place_address(place);
+                addr.into()
+            }
+            Rvalue::Aggregate(kind, operands) => self.emit_aggregate(kind, operands).unwrap(),
+            Rvalue::Cast(cast_kind, place) => {
+                let source_addr = self.emit_place_address(place);
+                let source_ty = self.mir_type_to_llvm_type(&place.ty);
+                let val = self
+                    .builder
+                    .build_load(source_ty, source_addr, "cast_src")
+                    .unwrap();
+
+                let to_ty =
+                    self.mir_type_to_llvm_type(target_ty.expect("Cast requires target type"));
+                let from_info = self.get_place_type_info(place);
+                let to_info = TypeInfo {
+                    llvm_type: to_ty,
+                    ty: target_ty.unwrap().clone(),
+                };
+
+                self.emit_cast(*cast_kind, val, from_info, to_info)
+            }
+        }
+    }
+
+    fn emit_cast(
+        &mut self,
+        kind: CastKind,
+        val: BasicValueEnum<'ctx>,
+        from: TypeInfo<'ctx>,
+        to: TypeInfo<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        match kind {
+            CastKind::Identity => val,
+            CastKind::SignExtend => self
+                .builder
+                .build_int_s_extend(val.into_int_value(), to.llvm_type.into_int_type(), "sext")
+                .unwrap()
+                .into(),
+            CastKind::ZeroExtend => self
+                .builder
+                .build_int_z_extend(val.into_int_value(), to.llvm_type.into_int_type(), "zext")
+                .unwrap()
+                .into(),
+            CastKind::Truncate => self
+                .builder
+                .build_int_truncate(
+                    val.into_int_value(),
+                    to.llvm_type.into_int_type(),
+                    "truncate",
+                )
+                .unwrap()
+                .into(),
+            CastKind::IntToFloat => {
+                if matches!(from.ty, Ty::Int(_)) {
+                    self.builder
+                        .build_signed_int_to_float(
+                            val.into_int_value(),
+                            to.llvm_type.into_float_type(),
+                            "int_to_float",
+                        )
+                        .unwrap()
+                        .into()
+                } else {
+                    self.builder
+                        .build_unsigned_int_to_float(
+                            val.into_int_value(),
+                            to.llvm_type.into_float_type(),
+                            "uint_to_float",
+                        )
+                        .unwrap()
+                        .into()
+                }
+            }
+            CastKind::UintToFloat => self
+                .builder
+                .build_unsigned_int_to_float(
+                    val.into_int_value(),
+                    to.llvm_type.into_float_type(),
+                    "unit_to_float",
+                )
+                .unwrap()
+                .into(),
+            CastKind::FloatToInt => {
+                if matches!(to.ty, Ty::Int(_)) {
+                    self.builder
+                        .build_float_to_signed_int(
+                            val.into_float_value(),
+                            to.llvm_type.into_int_type(),
+                            "float_to_int",
+                        )
+                        .unwrap()
+                        .into()
+                } else {
+                    self.builder
+                        .build_float_to_unsigned_int(
+                            val.into_float_value(),
+                            to.llvm_type.into_int_type(),
+                            "float_to_uint",
+                        )
+                        .unwrap()
+                        .into()
+                }
+            }
+            CastKind::FloatToUint => self
+                .builder
+                .build_float_to_unsigned_int(
+                    val.into_float_value(),
+                    to.llvm_type.into_int_type(),
+                    "float_to_unsigned_int",
+                )
+                .unwrap()
+                .into(),
+            CastKind::FloatPromote => self
+                .builder
+                .build_float_ext(
+                    val.into_float_value(),
+                    to.llvm_type.into_float_type(),
+                    "float_ext",
+                )
+                .unwrap()
+                .into(),
+            CastKind::FloatDemote => self
+                .builder
+                .build_float_trunc(
+                    val.into_float_value(),
+                    to.llvm_type.into_float_type(),
+                    "float_trunc",
+                )
+                .unwrap()
+                .into(),
+            CastKind::PtrToPtr => self
+                .builder
+                .build_pointer_cast(
+                    val.into_pointer_value(),
+                    to.llvm_type.into_pointer_type(),
+                    "ptr_to_ptr",
+                )
+                .unwrap()
+                .into(),
+            CastKind::PtrToInt => self
+                .builder
+                .build_ptr_to_int(
+                    val.into_pointer_value(),
+                    to.llvm_type.into_int_type(),
+                    "ptr_to_int",
+                )
+                .unwrap()
+                .into(),
+            CastKind::IntToPtr => self
+                .builder
+                .build_int_to_ptr(
+                    val.into_int_value(),
+                    to.llvm_type.into_pointer_type(),
+                    "int_to_ptr",
+                )
+                .unwrap()
+                .into(),
+            CastKind::Bitcast => self
+                .builder
+                .build_bit_cast(val, to.llvm_type, "bit_cast")
+                .unwrap()
+                .into(),
+        }
+    }
+
+    fn emit_aggregate(
+        &mut self,
+        kind: &AggregateKind,
+        operands: &[Operand],
+    ) -> Option<BasicValueEnum<'ctx>> {
+        let llvm_ty = match kind {
+            AggregateKind::Array(elem_ty) => {
+                let elem_type = self.mir_type_to_llvm_type(elem_ty);
+                elem_type
+                    .array_type(operands.len() as u32)
+                    .as_basic_type_enum()
+            }
+            AggregateKind::Tuple => {
+                let field_types: Vec<_> = operands
+                    .iter()
+                    .map(|op| self.get_operand_type(op))
+                    .collect();
+                self.context
+                    .struct_type(&field_types, false)
+                    .as_basic_type_enum()
+            }
+            AggregateKind::Adt(def_id, variant_idx) => {
+                let struct_name = self.get_def_id_name(*def_id);
+                let name = if !variant_idx.is_empty() && variant_idx[0] > 0 {
+                    format!("{}_{}", struct_name, variant_idx[0])
+                } else {
+                    struct_name
+                };
+                self.module
+                    .get_struct_type(&name)
+                    .unwrap_or_else(|| self.context.opaque_struct_type(&name))
+                    .as_basic_type_enum()
+            }
+        };
+
+        let temp_ptr = self
+            .builder
+            .build_alloca(llvm_ty, "aggregate_temp")
+            .unwrap();
+
+        for (i, operand) in operands.iter().enumerate() {
+            let field_val = self.emit_operand(operand);
+            let field_ptr = match kind {
+                AggregateKind::Adt(_, _) | AggregateKind::Tuple => self
+                    .builder
+                    .build_struct_gep(
+                        llvm_ty.into_struct_type(),
+                        temp_ptr,
+                        i as u32,
+                        &format!("field_{}", i),
+                    )
+                    .unwrap(),
+                AggregateKind::Array(_) => unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            llvm_ty,
+                            temp_ptr,
+                            &[
+                                self.context.i32_type().const_int(0, false),
+                                self.context.i32_type().const_int(i as u64, false),
+                            ],
+                            &format!("elem_{}", i),
+                        )
+                        .unwrap()
+                },
+            };
+            self.builder.build_store(field_ptr, field_val).unwrap();
+        }
+
+        Some(
+            self.builder
+                .build_load(llvm_ty, temp_ptr, "agg_val")
+                .unwrap(),
+        )
+    }
+
+    fn get_operand_type(&self, operand: &Operand) -> BasicTypeEnum<'ctx> {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) => {
+                self.mir_type_to_llvm_type(&self.get_local_ty(place.local))
+            }
+            Operand::Constant(constant) => {
+                let ty = match &constant.kind {
+                    ConstantKind::Literal { ty, .. } => ty,
+                    ConstantKind::Global { ty, .. } => ty,
+                    ConstantKind::Function { ty, .. } => ty,
+                    ConstantKind::Unit => &Ty::Unit,
+                };
+                self.mir_type_to_llvm_type(ty)
+            }
+        }
+    }
+
+    fn get_pointee_ty(&self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::Ptr(inner) => *inner.clone(),
+            Ty::Ref { to, .. } => *to.clone(),
+            _ => panic!("expected pointer or reference type, got {:?}", ty),
+        }
+    }
+
+    fn emit_operand(&mut self, operand: &Operand) -> BasicValueEnum<'ctx> {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) => {
+                let addr = self.emit_place_address(place);
+                let ty = self.mir_type_to_llvm_type(&place.ty);
+                self.builder.build_load(ty, addr, "load").unwrap()
+            }
+            Operand::Constant(constant) => self.emit_constant(constant),
+        }
+    }
+
+    fn emit_binary_op(
+        &mut self,
+        op: BinOp,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+        left_info: TypeInfo<'ctx>,
+        right_info: TypeInfo<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        // 处理整数操作
+        if left_info.llvm_type.is_int_type() && right_info.llvm_type.is_int_type() {
+            self.emit_int_binary_op(op, left.into_int_value(), right.into_int_value(), left_info)
+        } else if left_info.llvm_type.is_float_type() && right_info.llvm_type.is_float_type() {
+            self.emit_float_binary_op(op, left.into_float_value(), right.into_float_value())
+        } else {
+            panic!("Unsupported operand types for binary operation");
+        }
+    }
+
+    /// 整数二元操作（处理有符号/无符号）
+    fn emit_int_binary_op(
+        &self,
+        op: BinOp,
+        left: IntValue<'ctx>,
+        right: IntValue<'ctx>,
+        left_info: TypeInfo<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        match op {
+            BinOp::Div => {
+                if matches!(left_info.ty, Ty::Int(_)) {
+                    self.builder.build_int_signed_div(left, right, "sdiv")
+                } else {
+                    self.builder.build_int_unsigned_div(left, right, "udiv")
+                }
+            }
+            BinOp::Rem => {
+                if matches!(left_info.ty, Ty::Int(_)) {
+                    self.builder.build_int_signed_rem(left, right, "srem")
+                } else {
+                    self.builder.build_int_unsigned_rem(left, right, "urem")
+                }
+            }
+            BinOp::Shr => {
+                if matches!(left_info.ty, Ty::Int(_)) {
+                    self.builder.build_right_shift(left, right, true, "ashr")
+                } else {
+                    self.builder.build_right_shift(left, right, false, "lshr")
+                }
+            }
+            BinOp::Lt => {
+                let pred = if matches!(left_info.ty, Ty::Int(_)) {
+                    IntPredicate::SLT
+                } else {
+                    IntPredicate::ULT
+                };
+                self.builder.build_int_compare(pred, left, right, "lt")
+            }
+            BinOp::Le => {
+                let pred = if matches!(left_info.ty, Ty::Int(_)) {
+                    IntPredicate::SLE
+                } else {
+                    IntPredicate::ULE
+                };
+                self.builder.build_int_compare(pred, left, right, "le")
+            }
+            BinOp::Gt => {
+                let pred = if matches!(left_info.ty, Ty::Int(_)) {
+                    IntPredicate::SGT
+                } else {
+                    IntPredicate::UGT
+                };
+                self.builder.build_int_compare(pred, left, right, "gt")
+            }
+            BinOp::Ge => {
+                let pred = if matches!(left_info.ty, Ty::Int(_)) {
+                    IntPredicate::SGE
+                } else {
+                    IntPredicate::UGE
+                };
+                self.builder.build_int_compare(pred, left, right, "ge")
+            }
+            // 符号无关的操作
+            BinOp::Add => self.builder.build_int_add(left, right, "add"),
+            BinOp::Sub => self.builder.build_int_sub(left, right, "sub"),
+            BinOp::Mul => self.builder.build_int_mul(left, right, "mul"),
+            BinOp::BitAnd => self.builder.build_and(left, right, "and"),
+            BinOp::BitOr => self.builder.build_or(left, right, "or"),
+            BinOp::BitXor => self.builder.build_xor(left, right, "xor"),
+            BinOp::Shl => self.builder.build_left_shift(left, right, "shl"),
+            BinOp::Eq => self
+                .builder
+                .build_int_compare(IntPredicate::EQ, left, right, "eq"),
+            BinOp::Ne => self
+                .builder
+                .build_int_compare(IntPredicate::NE, left, right, "ne"),
+            _ => panic!("Unsupported binary op for integers: {:?}", op),
+        }
+        .unwrap()
+        .into()
+    }
+
+    /// 浮点数二元操作
+    fn emit_float_binary_op(
+        &self,
+        op: BinOp,
+        left: FloatValue<'ctx>,
+        right: FloatValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let result = match op {
+            BinOp::Add => self
+                .builder
+                .build_float_add(left, right, "fadd")
+                .unwrap()
+                .as_basic_value_enum(),
+            BinOp::Sub => self
+                .builder
+                .build_float_sub(left, right, "fsub")
+                .unwrap()
+                .as_basic_value_enum(),
+            BinOp::Mul => self
+                .builder
+                .build_float_mul(left, right, "fmul")
+                .unwrap()
+                .as_basic_value_enum(),
+            BinOp::Div => self
+                .builder
+                .build_float_div(left, right, "fdiv")
+                .unwrap()
+                .as_basic_value_enum(),
+            BinOp::Rem => self
+                .builder
+                .build_float_rem(left, right, "frem")
+                .unwrap()
+                .as_basic_value_enum(),
+            BinOp::Lt => self
+                .builder
+                .build_float_compare(inkwell::FloatPredicate::ULT, left, right, "flt")
+                .unwrap()
+                .as_basic_value_enum(),
+            BinOp::Le => self
+                .builder
+                .build_float_compare(inkwell::FloatPredicate::ULE, left, right, "fle")
+                .unwrap()
+                .as_basic_value_enum(),
+            BinOp::Gt => self
+                .builder
+                .build_float_compare(inkwell::FloatPredicate::UGT, left, right, "fgt")
+                .unwrap()
+                .as_basic_value_enum(),
+            BinOp::Ge => self
+                .builder
+                .build_float_compare(inkwell::FloatPredicate::UGE, left, right, "fge")
+                .unwrap()
+                .as_basic_value_enum(),
+            BinOp::Eq => self
+                .builder
+                .build_float_compare(inkwell::FloatPredicate::UEQ, left, right, "feq")
+                .unwrap()
+                .as_basic_value_enum(),
+            BinOp::Ne => self
+                .builder
+                .build_float_compare(inkwell::FloatPredicate::UNE, left, right, "fne")
+                .unwrap()
+                .as_basic_value_enum(),
+            _ => panic!("Unsupported binary op for floats: {:?}", op),
+        };
+
+        result
+    }
+
+    fn emit_unary_op(&mut self, op: UnOp, operand: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        match op {
+            UnOp::Neg => {
+                if operand.is_int_value() {
+                    self.builder
+                        .build_int_neg(operand.into_int_value(), "neg")
+                        .unwrap()
+                        .into()
+                } else {
+                    self.builder
+                        .build_float_neg(operand.into_float_value(), "fneg")
+                        .unwrap()
+                        .into()
+                }
+            }
+            UnOp::Not => {
+                let v = operand.into_int_value();
+                self.builder.build_not(v, "not").unwrap().into()
+            }
+        }
+    }
+
+    fn emit_constant(&mut self, constant: &Constant) -> BasicValueEnum<'ctx> {
+        match &constant.kind {
+            ConstantKind::Literal { value, ty } => {
+                let info = self.get_type_info(ty);
+                self.emit_literal(value, info)
+            }
+            ConstantKind::Global { def_id, ty } => self.emit_global(*def_id, ty),
+            ConstantKind::Function { def_id, ty: _ } => {
+                self.emit_function(*def_id, constant.span).unwrap()
+            }
+            ConstantKind::Unit => self.context.i32_type().const_int(0, false).into(),
+        }
+    }
+
+    fn emit_literal(&mut self, value: &LiteralValue, info: TypeInfo<'ctx>) -> BasicValueEnum<'ctx> {
+        match value {
+            LiteralValue::Int { value, kind } => {
+                let is_signed = matches!(kind, LiteralIntKind::Signed(_));
+                info.llvm_type
+                    .into_int_type()
+                    .const_int(*value, is_signed)
+                    .into()
+            }
+            LiteralValue::Bool(b) => self.context.bool_type().const_int(*b as u64, false).into(),
+            LiteralValue::Char(c) => self.context.i8_type().const_int(*c as u64, false).into(),
+            LiteralValue::Str(s) => {
+                let global = unsafe {
+                    self.builder
+                        .build_global_string(&get_global_string(*s).unwrap(), "str")
+                        .unwrap()
+                };
+                global.as_pointer_value().into()
+            }
+            LiteralValue::Float { value, kind } => {
+                let float_ty = info.llvm_type.into_float_type();
+                float_ty.const_float(*value).into()
+            }
+            LiteralValue::Unit => self.context.i32_type().const_int(0, false).into(),
+        }
+    }
+
+    fn emit_global(&mut self, def_id: DefId, ty: &Ty) -> BasicValueEnum<'ctx> {
+        let name = self.get_def_id_name(def_id);
+        let global = self.module.get_global(&name).expect("Global not found");
+        let ptr = global.as_pointer_value();
+        let pointee_ty = self.mir_type_to_llvm_type(ty);
+        self.builder.build_load(pointee_ty, ptr, "global").unwrap()
+    }
+
+    fn emit_function(&mut self, def_id: DefId, span: Span) -> Option<BasicValueEnum<'ctx>> {
+        let fn_val = match self.value_map.get(&def_id) {
+            Some(fn_val) => fn_val,
+            _ => {
+                self.diagnostics.push(
+                    error(format!("无法找到函数 `{}`", self.get_def_id_name(def_id)))
+                        .with_span(span)
+                        .build(),
+                );
+                return None;
+            }
+        };
+        Some(fn_val.as_global_value().as_pointer_value().into())
+    }
+
+    fn mir_type_to_llvm_type(&self, ty: &Ty) -> BasicTypeEnum<'ctx> {
+        match ty {
+            Ty::Int(int_kind) => self
+                .context
+                .custom_width_int_type(int_kind.bit_width())
+                .into(),
+            Ty::UInt(int_kind) => self
+                .context
+                .custom_width_int_type(int_kind.bit_width())
+                .into(),
+            Ty::Float(FloatKind::F32) => self.context.f32_type().into(),
+            Ty::Float(FloatKind::F64) => self.context.f64_type().into(),
+            Ty::Bool => self.context.bool_type().into(),
+            Ty::Char => self.context.i8_type().into(),
+            Ty::Str
+            | Ty::RawPtr
+            | Ty::Ptr(_)
+            | Ty::Ref { .. }
+            | Ty::Fn { .. }
+            | Ty::ExternFn { .. } => self.context.ptr_type(AddressSpace::default()).into(),
+            Ty::Array { element, len } => {
+                let elem_ty = self.mir_type_to_llvm_type(element);
+                match len {
+                    Some(n) => elem_ty.array_type(*n as u32).into(),
+                    None => self.context.ptr_type(AddressSpace::default()).into(),
+                }
+            }
+            Ty::Tuple(elems) => {
+                if elems.is_empty() {
+                    self.context.struct_type(&[], false).into()
+                } else {
+                    let field_tys: Vec<_> = elems
+                        .iter()
+                        .map(|t| self.mir_type_to_llvm_type(t))
+                        .collect();
+                    self.context.struct_type(&field_tys, false).into()
+                }
+            }
+            Ty::Adt(def_id) => {
+                let name = self.get_def_id_name(*def_id);
+                self.module
+                    .get_struct_type(&name)
+                    .unwrap_or_else(|| self.context.opaque_struct_type(&name))
+                    .into()
+            }
+            Ty::Range { ty } => {
+                let inner = self.mir_type_to_llvm_type(ty);
+                self.context.struct_type(&[inner, inner], false).into()
+            }
+            Ty::Unit | Ty::Never | Ty::Error => self.context.struct_type(&[], false).into(),
+            Ty::SelfType => self.context.i32_type().into(),
+            Ty::Unknown => self.context.i32_type().into(),
+        }
+    }
+
+    /// 获取操作数的类型信息
+    fn get_operand_type_info(&self, operand: &Operand) -> TypeInfo<'ctx> {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) => self.get_place_type_info(place),
+            Operand::Constant(constant) => {
+                let ty = match &constant.kind {
+                    ConstantKind::Literal { ty, .. } => ty,
+                    ConstantKind::Global { ty, .. } => ty,
+                    ConstantKind::Function { ty, .. } => ty,
+                    ConstantKind::Unit => &Ty::Unit,
+                };
+                self.get_type_info(ty)
+            }
+        }
+    }
+
+    /// 获取位置的类型信息
+    fn get_place_type_info(&self, place: &Place) -> TypeInfo<'ctx> {
+        let ty = &place.ty;
+        self.get_type_info(ty)
+    }
+
+    /// 获取类型的完整信息
+    fn get_type_info(&self, ty: &Ty) -> TypeInfo<'ctx> {
+        let llvm_type = self.mir_type_to_llvm_type(ty);
+        TypeInfo {
+            llvm_type,
+            ty: ty.clone(),
+        }
+    }
+
+    /// 判断是否为有符号类型
+    fn is_signed_type(&self, ty: &Ty) -> bool {
+        matches!(ty, Ty::Int(_))
+    }
+
+    fn get_def_id_name(&self, def_id: DefId) -> String {
+        get_global_string(self.mir_crate.definitions[def_id.index as usize].name)
+            .unwrap()
+            .to_string()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use inkwell::context::Context;
-    use litec_mir::{BasicBlock, LocalDecl, Terminator};
-    use litec_span::StringId;
-    use litec_typed_hir::{def_id::DefId, DefKind};
+    use std::path::Path;
 
-    // 辅助函数：创建测试用的 DefId
-    fn create_test_def_id() -> DefId {
-        DefId {
-            index: 0,
-            kind: DefKind::Function,
-        }
-    }
+    use super::Context;
+    use litec_lower::lower;
+    use litec_mir_lower::build;
+    use litec_name_resolver::resolve;
+    use litec_parse::parser::parse;
+    use litec_span::SourceMap;
+    use litec_type_checker::check;
 
-    // 辅助函数：创建测试用的 StringId
-    fn create_test_string_id() -> StringId {
-        StringId(0)
-    }
+    use crate::CodeGen;
 
-    // 辅助函数：创建测试用的 Span
-    fn create_test_span() -> litec_span::Span {
-        litec_span::Span::default()
-    }
-
-    // 测试基础架构
     #[test]
-    fn test_codegen_initialization() {
-        let context = Context::create();
-        let codegen = CodeGen::new(&context, "test_module");
-        
-        assert!(codegen.module.get_name().to_str().unwrap().contains("test_module"));
-        assert!(codegen.local_vars.is_empty());
-        assert!(codegen.basic_blocks.is_empty());
-    }
-
-    // 测试类型转换
-    #[test]
-    fn test_type_conversion() {
-        let context = Context::create();
-        let codegen = CodeGen::new(&context, "test_types");
-
-        // 测试整数类型转换
-        let i32_ty = codegen.get_value_type(Ty::Int(IntKind::I32));
-        assert!(i32_ty.is_some());
-        
-        let f64_ty = codegen.get_value_type(Ty::Float(FloatKind::F64));
-        assert!(f64_ty.is_some());
-        
-        let bool_ty = codegen.get_value_type(Ty::Bool);
-        assert!(bool_ty.is_some());
-        
-        // 测试 void 类型
-        let unit_ty = codegen.get_value_type(Ty::Unit);
-        assert!(unit_ty.is_none());
-        
-        let never_ty = codegen.get_value_type(Ty::Never);
-        assert!(never_ty.is_none());
-    }
-
-    // 测试字面量编译
-    #[test]
-    fn test_literal_compilation() {
-        let context = Context::create();
-        let mut codegen = CodeGen::new(&context, "test_literals");
-
-        // 测试整数字面量
-        let i32_literal = Literal::I32(42);
-        let compiled_i32 = codegen.compile_literal(&i32_literal);
-        assert!(compiled_i32.is_some());
-
-        // 测试浮点数字面量
-        let f64_literal = Literal::F64(3.14);
-        let compiled_f64 = codegen.compile_literal(&f64_literal);
-        assert!(compiled_f64.is_some());
-
-        // 测试布尔字面量
-        let bool_literal = Literal::Bool(true);
-        let compiled_bool = codegen.compile_literal(&bool_literal);
-        assert!(compiled_bool.is_some());
-
-        // 测试 Unit 字面量
-        let unit_literal = Literal::Unit;
-        let compiled_unit = codegen.compile_literal(&unit_literal);
-        assert!(compiled_unit.is_none());
-    }
-
-    // 测试操作数编译
-    #[test]
-    fn test_operand_compilation() {
-        let context = Context::create();
-        let mut codegen = CodeGen::new(&context, "test_operands");
-
-        // 测试字面量操作数
-        let literal_operand = Operand::Literal(Literal::I32(100));
-        let compiled_literal = codegen.compile_operand(&literal_operand);
-        assert!(compiled_literal.is_some());
-
-        // 测试局部变量操作数（需要先分配变量）
-        let local_operand = Operand::Local(LocalId(0));
-        let compiled_local = codegen.compile_operand(&local_operand);
-        assert!(compiled_local.is_none()); // 应该失败，因为没有分配该局部变量
-    }
-
-    // 测试一元运算编译
-    #[test]
-    fn test_unary_operations() {
-        let context = Context::create();
-        let module = context.create_module("test_unary");
-        let builder = context.create_builder();
-        let codegen = CodeGen {
-            context: &context,
-            module,
-            builder,
-            local_vars: FxHashMap::default(),
-            basic_blocks: FxHashMap::default(),
-            local_types: FxHashMap::default(),
-            printf_fn: None,
-        };
-
-        // 创建一个测试函数和基本块
-        let fn_type = context.i32_type().fn_type(&[], false);
-        let function = codegen.module.add_function("test_unary_func", fn_type, None);
-        let entry_block = context.append_basic_block(function, "entry");
-
-        // 设置构建器位置
-        codegen.builder.position_at_end(entry_block);
-
-        // 测试整数取负
-        let int_val = codegen.context.i32_type().const_int(42, false).into();
-        let neg_result = codegen.compile_unop_enhanced(
-            UnOp::Neg, 
-            int_val, 
-            &Ty::Int(IntKind::I32)
-        );
-        assert!(neg_result.is_some());
-
-        // 测试浮点数取负
-        let float_val = codegen.context.f64_type().const_float(3.14).into();
-        let fneg_result = codegen.compile_unop_enhanced(
-            UnOp::Neg, 
-            float_val, 
-            &Ty::Float(FloatKind::F64)
-        );
-        assert!(fneg_result.is_some());
-
-        // 测试逻辑非
-        let bool_val = codegen.context.bool_type().const_int(1, false).into();
-        let not_result = codegen.compile_unop_enhanced(
-            UnOp::Not, 
-            bool_val, 
-            &Ty::Bool
-        );
-        assert!(not_result.is_some());
-    }
-
-    // 测试二元运算编译
-    #[test]
-    fn test_binary_operations() {
-            let context = Context::create();
-        let module = context.create_module("test_binary");
-        let builder = context.create_builder();
-        let codegen = CodeGen {
-            context: &context,
-            module,
-            builder,
-            local_vars: FxHashMap::default(),
-            basic_blocks: FxHashMap::default(),
-            local_types: FxHashMap::default(),
-            printf_fn: None,
-        };
-
-        // 创建一个测试函数和基本块
-        let fn_type = context.i32_type().fn_type(&[], false);
-        let function = codegen.module.add_function("test_binary_func", fn_type, None);
-        let entry_block = context.append_basic_block(function, "entry");
-
-        // 设置构建器位置
-        codegen.builder.position_at_end(entry_block);
-
-        // 测试整数加法
-        let lhs = codegen.context.i32_type().const_int(10, false).into();
-        let rhs = codegen.context.i32_type().const_int(20, false).into();
-        let add_result = codegen.compile_binop_enhanced(
-            BinOp::Add, 
-            lhs, 
-            rhs, 
-            &Ty::Int(IntKind::I32), 
-            &Ty::Int(IntKind::I32)
-        );
-        assert!(add_result.is_some());
-
-        // 测试浮点数运算
-        let flhs = codegen.context.f32_type().const_float(1.0).into();
-        let frhs = codegen.context.f32_type().const_float(2.0).into();
-        let fadd_result = codegen.compile_binop_enhanced(
-            BinOp::Add, 
-            flhs, 
-            frhs, 
-            &Ty::Float(FloatKind::F32), 
-            &Ty::Float(FloatKind::F32)
-        );
-        assert!(fadd_result.is_some());
-    }
-
-    // 测试简单的函数编译
-    #[test]
-    fn test_simple_function_compilation() {
-        let context = Context::create();
-        let mut codegen = CodeGen::new(&context, "test_simple_func");
-
-        // 创建简单的 MIR 函数
-        let mir_func = MirFunction {
-            def_id: create_test_def_id(),
-            name: create_test_string_id(),
-            locals: vec![
-                LocalDecl {
-                    ty: Ty::Int(IntKind::I32),
-                    name: Some(create_test_string_id()),
-                    span: create_test_span(),
-                }
-            ],
-            basic_blocks: vec![
-                BasicBlock {
-                    id: BasicBlockId(0),
-                    statements: vec![],
-                    terminator: Some(Terminator::Return {
-                        value: Operand::Literal(Literal::I32(42)),
-                        span: create_test_span(),
-                    }),
-                }
-            ],
-            span: create_test_span(),
-        };
-
-        // 编译函数
-        let result = codegen.compile_function(&mir_func);
-        assert!(result.is_some());
-
-        // 验证生成的模块
-        let module = &codegen.module;
-        assert!(!module.print_to_string().to_string().is_empty());
-    }
-
-    // 测试控制流编译
-    #[test]
-    fn test_control_flow_compilation() {
-        let context = Context::create();
-        let mut codegen = CodeGen::new(&context, "test_control_flow");
-
-        // 创建包含多个基本块的 MIR 函数
-        let mir_func = MirFunction {
-            def_id: create_test_def_id(),
-            name: create_test_string_id(),
-            locals: vec![
-                LocalDecl {
-                    ty: Ty::Int(IntKind::I32),
-                    name: Some(create_test_string_id()),
-                    span: create_test_span(),
-                },
-                LocalDecl {
-                    ty: Ty::Bool,
-                    name: Some(create_test_string_id()),
-                    span: create_test_span(),
-                }
-            ],
-            basic_blocks: vec![
-                BasicBlock {
-                    id: BasicBlockId(0),
-                    statements: vec![
-                        Statement::Assign {
-                            dest: LocalId(1),
-                            rvalue: Rvalue::Use(Operand::Literal(Literal::Bool(true))),
-                            span: create_test_span(),
-                        }
-                    ],
-                    terminator: Some(Terminator::Goto {
-                        target: BasicBlockId(1),
-                        span: create_test_span(),
-                    }),
-                },
-                BasicBlock {
-                    id: BasicBlockId(1),
-                    statements: vec![],
-                    terminator: Some(Terminator::Return {
-                        value: Operand::Literal(Literal::I32(0)),
-                        span: create_test_span(),
-                    }),
-                }
-            ],
-            span: create_test_span(),
-        };
-
-        let result = codegen.compile_function(&mir_func);
-        assert!(result.is_some());
-    }
-
-    // 测试类型检查辅助函数
-    #[test]
-    fn test_type_helpers() {
-        let context = Context::create();
-        let codegen = CodeGen::new(&context, "test_helpers");
-
-        // 测试有符号整数判断
-        assert!(codegen.is_signed_int(&Ty::Int(IntKind::I32)));
-        assert!(codegen.is_signed_int(&Ty::Int(IntKind::Isize)));
-        assert!(!codegen.is_signed_int(&Ty::Int(IntKind::U32)));
-        assert!(!codegen.is_signed_int(&Ty::Bool));
-
-        // 测试运算有效性检查
-        assert!(codegen.is_valid_for_not(&Ty::Bool));
-        assert!(codegen.is_valid_for_not(&Ty::Int(IntKind::I32)));
-        assert!(!codegen.is_valid_for_not(&Ty::Float(FloatKind::F32)));
-
-        assert!(codegen.is_valid_for_neg(&Ty::Int(IntKind::I32)));
-        assert!(codegen.is_valid_for_neg(&Ty::Float(FloatKind::F64)));
-        assert!(!codegen.is_valid_for_neg(&Ty::Bool));
-    }
-
-    // 测试操作数类型推断
-    #[test]
-    fn test_operand_type_inference() {
-        let context = Context::create();
-        let codegen = CodeGen::new(&context, "test_type_inference");
-
-        // 测试字面量类型推断
-        let i32_literal = Operand::Literal(Literal::I32(42));
-        let i32_ty = codegen.get_operand_type(&i32_literal);
-        assert_eq!(i32_ty, Some(Ty::Int(IntKind::I32)));
-
-        let f64_literal = Operand::Literal(Literal::F64(3.14));
-        let f64_ty = codegen.get_operand_type(&f64_literal);
-        assert_eq!(f64_ty, Some(Ty::Float(FloatKind::F64)));
-
-        let bool_literal = Operand::Literal(Literal::Bool(true));
-        let bool_ty = codegen.get_operand_type(&bool_literal);
-        assert_eq!(bool_ty, Some(Ty::Bool));
-    }
-
-    // 测试错误情况处理
-    #[test]
-    fn test_error_handling() {
-        let context = Context::create();
-        let mut codegen = CodeGen::new(&context, "test_errors");
-
-        // 测试不支持的 Rvalue 变体
-        let unsupported_rvalue = Rvalue::Len(Place {
-            base: PlaceBase::Local(LocalId(0)),
-            projections: vec![],
-        });
-        
-        let result = codegen.compile_rvalue(&unsupported_rvalue);
-        assert!(result.is_none());
-
-        // 测试不存在的局部变量访问
-        let invalid_local = Operand::Local(LocalId(999));
-        let result = codegen.compile_operand(&invalid_local);
-        assert!(result.is_none());
-    }
-
-    // 测试平台相关的整数类型
-    #[test]
-    fn test_platform_specific_types() {
-        let context = Context::create();
-        let codegen = CodeGen::new(&context, "test_platform");
-
-        let isize_ty = codegen.convert_int_type(IntKind::Isize);
-        let usize_ty = codegen.convert_int_type(IntKind::Usize);
-
-        // 在 64 位平台上，isize 和 usize 应该是 64 位
-        #[cfg(target_pointer_width = "64")]
-        {
-            assert_eq!(isize_ty.get_bit_width(), 64);
-            assert_eq!(usize_ty.get_bit_width(), 64);
+    fn test() {
+        let source = r#"
+        extern "Lite" {
+            fn printf(fmt: str, ...) -> i32;
         }
 
-        // 在 32 位平台上，isize 和 usize 应该是 32 位
-        #[cfg(target_pointer_width = "32")]
-        {
-            assert_eq!(isize_ty.get_bit_width(), 32);
-            assert_eq!(usize_ty.get_bit_width(), 32);
+        fn add(a: i32, b: i32) -> i32 {
+            return a + b;
         }
-    }
 
-    // 集成测试：编译完整的计算函数
-    #[test]
-    fn test_integration_arithmetic_function() {
+
+        fn main() {
+            let a = add(1, 2);
+            printf("%d\n", a);
+        }"#;
+        let mut source_map = SourceMap::new();
+        let file_id = source_map.add_file("test.lt".into(), source.to_string(), &Path::new(""));
+        let (ast, diagnostics) = parse(&source_map, file_id);
+        for diagnostic in diagnostics {
+            println!("{}", diagnostic.render(&source_map));
+        }
+        let (hir, diagnostics) = lower(ast);
+        for diagnostic in diagnostics {
+            println!("{}", diagnostic.render(&source_map));
+        }
+        let resolve_output = resolve(hir, &mut source_map, file_id);
+        for diagnostic in &resolve_output.diagnostics {
+            println!("{}", diagnostic.render(&source_map));
+        }
+        let (typed_hir, diagnostics) = check(resolve_output);
+        for diagnostic in diagnostics {
+            println!("{}", diagnostic.render(&source_map));
+        }
+        let mir_crate = build(typed_hir);
         let context = Context::create();
-        let mut codegen = CodeGen::new(&context, "test_integration");
-
-        // 创建一个计算 (a + b) * 2 的函数
-        let mir_func = MirFunction {
-            def_id: create_test_def_id(),
-            name: create_test_string_id(),
-            locals: vec![
-                LocalDecl { // return value
-                    ty: Ty::Int(IntKind::I32),
-                    name: Some(create_test_string_id()),
-                    span: create_test_span(),
-                },
-                LocalDecl { // a
-                    ty: Ty::Int(IntKind::I32),
-                    name: Some(create_test_string_id()),
-                    span: create_test_span(),
-                },
-                LocalDecl { // b  
-                    ty: Ty::Int(IntKind::I32),
-                    name: Some(create_test_string_id()),
-                    span: create_test_span(),
-                },
-                LocalDecl { // temp result
-                    ty: Ty::Int(IntKind::I32),
-                    name: Some(create_test_string_id()),
-                    span: create_test_span(),
-                }
-            ],
-            basic_blocks: vec![
-                BasicBlock {
-                    id: BasicBlockId(0),
-                    statements: vec![
-                        // a = 10
-                        Statement::Assign {
-                            dest: LocalId(1),
-                            rvalue: Rvalue::Use(Operand::Literal(Literal::I32(10))),
-                            span: create_test_span(),
-                        },
-                        // b = 20
-                        Statement::Assign {
-                            dest: LocalId(2),
-                            rvalue: Rvalue::Use(Operand::Literal(Literal::I32(20))),
-                            span: create_test_span(),
-                        },
-                        // temp = a + b
-                        Statement::Assign {
-                            dest: LocalId(3),
-                            rvalue: Rvalue::Binary(
-                                BinOp::Add,
-                                Operand::Local(LocalId(1)),
-                                Operand::Local(LocalId(2)),
-                            ),
-                            span: create_test_span(),
-                        },
-                        // return temp * 2
-                        Statement::Assign {
-                            dest: LocalId(0),
-                            rvalue: Rvalue::Binary(
-                                BinOp::Mul,
-                                Operand::Local(LocalId(3)),
-                                Operand::Literal(Literal::I32(2)),
-                            ),
-                            span: create_test_span(),
-                        },
-                    ],
-                    terminator: Some(Terminator::Return {
-                        value: Operand::Local(LocalId(0)),
-                        span: create_test_span(),
-                    }),
-                }
-            ],
-            span: create_test_span(),
-        };
-
-        let result = codegen.compile_function(&mir_func);
-        assert!(result.is_some());
-
-        // 输出生成的 IR 用于调试
-        println!("Generated IR for arithmetic function:");
-        println!("{}", codegen.module.print_to_string().to_string());
+        let mut codegen = CodeGen::new(&context, mir_crate);
+        codegen.generate();
     }
 }

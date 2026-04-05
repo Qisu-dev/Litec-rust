@@ -8,12 +8,13 @@ litec_hir = { path = "../litec_hir" }
 litec_error = { path = "../litec_error" }
 litec_span = { path = "../litec_span" }
 litec_typed_hir = { path = "../litec_typed_hir" }
-litec_parse = { path = "../litec_parse" }
-litec_lower = { path = "../litec_lower" }
-litec_name_resolver = { path = "../litec_name_resolver" }
 
 rustc-hash = "2.1.1"
 thiserror = "2.0.16"
 
 [lib]
 
+[dev-dependencies]
+litec_parse = { path = "../litec_parse" }
+litec_ast_lower = { path = "../litec_ast_lower" }
+litec_name_resolver = { path = "../litec_name_resolver" }

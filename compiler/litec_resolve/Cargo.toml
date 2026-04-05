@@ -1,0 +1,18 @@
+[package]
+name = "litec_resolve"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+litec_span = { path = "../litec_span" }
+litec_ast = { path = "../litec_ast" }
+litec_hir = { path = "../litec_hir" }
+litec_middle = { path = "../litec_middle" }
+litec_error = { path = "../litec_error" }
+litec_session = { path = "../litec_session" }
+
+rustc-hash = "2.1.1"
+indexmap = "2.13.0"
+
+[dev-dependencies]
+litec_parse = { path = "../litec_parse" }

@@ -1,200 +1,189 @@
-pub mod def_id;
-pub mod ty;
+pub mod builtins;
 
-use litec_hir::LiteralValue;
+use litec_hir::{AbiType, AssignOp, BinOp, LiteralValue, Mutability, PosOp, UnOp, Visibility};
 use litec_span::{Span, StringId};
+use litec_ty::{def_id::DefId, ty::Ty};
 
-use crate::{def_id::DefId, ty::Ty};
+use crate::builtins::Builtins;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DefKind {
-    Function,
-    Struct,
-    Variable,
-    Parameter,
-    Field,
-    Module,
-    Constant,
-    ExternFunction,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ModuleId {
-    pub id: u32,
-}
-
-impl ModuleId {
-    pub fn new(id: u32) -> Self {
-        ModuleId { id }
-    }
+#[derive(Debug)]
+pub struct Definition {
+    pub def_id: DefId,
+    pub name: StringId,
+    pub span: Span,
 }
 
 #[derive(Debug)]
-pub struct TypedCrate {
-    pub items: Vec<TypedItem>,
+pub struct TypedCrate<'hir> {
+    pub items: Vec<TypedItem<'hir>>,
+    pub builtin: Builtins<'hir>,
+    pub definitions: Vec<Definition>,
 }
 
 #[derive(Debug, Clone)]
-pub enum TypedExpr {
+pub enum TypedExpr<'hir> {
+    /* ---------- 原子 ---------- */
     Literal {
         value: LiteralValue,
-        ty: Ty,
+        ty: Ty<'hir>,
         span: Span,
     },
-    Ident {
-        name: StringId, // 用于错误提示
-        def_id: DefId,  // ✅ 指向定义
-        ty: Ty,
+    Local {
+        def_id: DefId,
+        ty: Ty<'hir>,
         span: Span,
     },
-    Addition {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty,
-        span: Span,
-    },
-    Subtract {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty,
-        span: Span,
-    },
-    Multiply {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty,
-        span: Span,
-    },
-    Divide {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty,
-        span: Span,
-    },
-    Remainder {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty,
+    Global {
+        def_id: DefId, // 直接存储DefId而不是ResResult
+        ty: Ty<'hir>,
         span: Span,
     },
 
-    Equal {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty, // bool
+    /* ---------- 运算 ---------- */
+    Binary {
+        left: Box<TypedExpr<'hir>>,
+        op: BinOp,
+        right: Box<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
         span: Span,
     },
-    NotEqual {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty, // bool
+    Unary {
+        op: UnOp,
+        operand: Box<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
         span: Span,
     },
-    LessThan {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty, // bool
+    Postfix {
+        operand: Box<TypedExpr<'hir>>,
+        op: PosOp,
+        ty: Ty<'hir>,
         span: Span,
     },
-    LessThanOrEqual {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty, // bool
-        span: Span,
-    },
-    GreaterThan {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty, // bool
-        span: Span,
-    },
-    GreaterThanOrEqual {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty, // bool
-        span: Span,
-    },
-
-    LogicalAnd {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty,
-        span: Span,
-    },
-    LogicalOr {
-        left: Box<TypedExpr>,
-        right: Box<TypedExpr>,
-        ty: Ty,
-        span: Span,
-    },
-    LogicalNot {
-        operand: Box<TypedExpr>,
-        ty: Ty,
-        span: Span,
-    },
-
     Assign {
-        target: Box<TypedExpr>,
-        value: Box<TypedExpr>,
-        ty: Ty, // () 或其他
-        span: Span,
-    },
-
-    Negate {
-        operand: Box<TypedExpr>,
-        ty: Ty,
-        span: Span,
-    },
-    Dereference {
-        expr: Box<TypedExpr>,
-        ty: Ty,
+        target: Box<TypedExpr<'hir>>,
+        op: AssignOp,
+        value: Box<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
         span: Span,
     },
     AddressOf {
-        base: Box<TypedExpr>,
-        mutable: bool,
-        ty: Ty,
+        expr: Box<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
+        span: Span,
+    },
+    Dereference {
+        expr: Box<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
         span: Span,
     },
 
+    /* ---------- 复合 ---------- */
     Call {
         callee: DefId,
-        args: Vec<TypedExpr>,
-        ty: Ty, // 返回类型
+        args: Vec<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
         span: Span,
     },
-
     Block {
-        block: TypedBlock,
+        block: TypedBlock<'hir>,
+        ty: Ty<'hir>, // 添加类型信息
+        span: Span,
     },
-
     If {
-        condition: Box<TypedExpr>,
-        then_branch: TypedBlock,
-        else_branch: Option<Box<TypedExpr>>,
-        ty: Ty,
+        condition: Box<TypedExpr<'hir>>,
+        then_branch: TypedBlock<'hir>,
+        else_branch: Option<Box<TypedExpr<'hir>>>,
+        ty: Ty<'hir>,
         span: Span,
     },
-
     Loop {
-        body: TypedBlock,
-        ty: Ty, // ! (never type)
+        body: TypedBlock<'hir>,
+        ty: Ty<'hir>,
         span: Span,
     },
-
     FieldAccess {
-        base: Box<TypedExpr>,
-        field: StringId,
-        def_id: DefId,
-        ty: Ty,
+        base: Box<TypedExpr<'hir>>,
+        field: TypedField<'hir>,
+        def_id: DefId, // 字段的DefId
+        ty: Ty<'hir>,
+        span: Span,
+    },
+    Index {
+        indexed: Box<TypedExpr<'hir>>,
+        index: Box<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
+        span: Span,
+    },
+    Tuple {
+        elements: Vec<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
+        span: Span,
+    },
+    Unit {
+        ty: Ty<'hir>,
         span: Span,
     },
 
-    PathAccess {
-        def_id: DefId, // 全局唯一
-        ty: Ty,
+    /* ---------- 范围 ---------- */
+    To {
+        start: Box<TypedExpr<'hir>>,
+        end: Box<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
         span: Span,
     },
+    ToEq {
+        start: Box<TypedExpr<'hir>>,
+        end: Box<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
+        span: Span,
+    },
+
+    /* ---------- 分组 ---------- */
+    Grouped {
+        expr: Box<TypedExpr<'hir>>,
+        ty: Ty<'hir>,
+        span: Span,
+    },
+
+    StructInit {
+        def_id: DefId,
+        fields: Vec<(StringId, TypedExpr<'hir>)>,
+        ty: Ty<'hir>,
+        span: Span,
+    },
+
+    Cast {
+        expr: Box<TypedExpr<'hir>>,
+        kind: CastKind,
+        ty: Ty<'hir>,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum CastKind {
+    // 无需转换
+    Identity, // 相同类型
+
+    // 整数
+    SignExtend, // i8 -> i32
+    ZeroExtend, // u8 -> u32
+    Truncate,   // i32 -> i8
+
+    // 浮点
+    IntToFloat,   // i32 -> f64
+    UintToFloat,  // u32 -> f64
+    FloatToInt,   // f64 -> i32 (截断)
+    FloatToUint,  // f64 -> u32 (截断)
+    FloatPromote, // f32 -> f64
+    FloatDemote,  // f64 -> f32
+
+    // 指针
+    PtrToPtr, // *T -> *U
+    PtrToInt, // *T -> usize
+    IntToPtr, // usize -> *T
+
+    Bitcast, // 直接转换
 }
 
 // ========================
@@ -202,142 +191,104 @@ pub enum TypedExpr {
 // ========================
 
 #[derive(Debug, Clone)]
-pub enum TypedStmt {
-    Expr(Box<TypedExpr>),
+pub enum TypedStmt<'hir> {
+    Expr(Box<TypedExpr<'hir>>),
     Let {
+        mutable: Mutability,
         name: StringId,
         def_id: DefId, // 变量的 DefId
-        ty: Ty,        // 声明的类型
-        init: Option<Box<TypedExpr>>,
+        ty: Ty<'hir>,  // 声明的类型
+        init: Option<Box<TypedExpr<'hir>>>,
         span: Span,
     },
     Return {
-        value: Option<Box<TypedExpr>>,
+        value: Option<Box<TypedExpr<'hir>>>,
         span: Span,
     },
     Break {
-        value: Option<Box<TypedExpr>>,
+        value: Option<Box<TypedExpr<'hir>>>,
+        ty: Ty<'hir>,
         span: Span,
     },
     Continue {
+        ty: Ty<'hir>,
         span: Span,
     },
 }
 
 #[derive(Debug, Clone)]
-pub struct TypedBlock {
-    pub stmts: Vec<TypedStmt>,
-    pub tail: Option<Box<TypedExpr>>,
-    pub ty: Ty,
+pub struct TypedBlock<'hir> {
+    pub stmts: Vec<TypedStmt<'hir>>,
+    pub tail: Option<Box<TypedExpr<'hir>>>,
+    pub ty: Ty<'hir>,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
-pub struct TypedParam {
+pub struct TypedParam<'hir> {
     pub name: StringId,
     pub def_id: DefId,
-    pub ty: Ty,
+    pub ty: Ty<'hir>,
     pub span: Span,
 }
 
 #[derive(Debug)]
-pub enum TypedItem {
+pub enum TypedItem<'hir> {
     Function {
         def_id: DefId,
         visibility: Visibility,
         name: StringId,
-        params: Vec<TypedParam>,
-        return_ty: Ty,
-        body: TypedBlock,
+        params: Vec<TypedParam<'hir>>,
+        return_ty: Ty<'hir>,
+        body: TypedBlock<'hir>,
         span: Span,
     },
     Struct {
         def_id: DefId,
         visibility: Visibility,
         name: StringId,
-        fields: Vec<TypedField>,
+        fields: Vec<TypedField<'hir>>,
+        span: Span,
+    },
+    Use {
+        visibility: Visibility,
+        alias: StringId,
+        target: DefId,
+        span: Span,
+    },
+    Module {
+        def_id: DefId,
+        visibility: Visibility,
+        name: StringId,
+        items: Vec<TypedItem<'hir>>,
+        span: Span,
+    },
+    Extern {
+        visibility: Visibility,
+        abi: AbiType,
+        items: Vec<TypedExternItem<'hir>>,
         span: Span,
     },
 }
 
 #[derive(Debug, Clone)]
-pub struct TypedField {
-    pub name: StringId,
-    pub def_id: DefId,
-    pub ty: Ty,
-    pub visibility: Visibility,
-    pub span: Span,
+pub enum TypedExternItem<'hir> {
+    Function {
+        def_id: DefId,
+        name: StringId,
+        params: Vec<TypedParam<'hir>>,
+        is_variadic: bool,
+        return_ty: Ty<'hir>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
-pub enum Visibility {
-    Public,
-    Private,
+pub struct TypedField<'hir> {
+    pub name: StringId,
+    pub def_id: DefId,
+    pub ty: Ty<'hir>,
+    pub visibility: Visibility,
+    pub index: u32,
+    pub span: Span,
 }
-
-macro_rules! impl_ty {
-    (
-        $enum_name:ident,
-        [ $($common_variant:ident),* $(,)? ],
-        ($($special_arm:tt)*)
-    ) => {
-        impl $enum_name {
-            pub fn ty(&self) -> Ty {
-                match self {
-                    // 处理所有通用变体
-                    $( $enum_name::$common_variant { ty, .. } => ty.clone(), )*
-                    // 插入特殊分支
-                    $($special_arm)*
-                }
-            }
-        }
-    };
-}
-
-impl_ty!(
-    TypedExpr,
-    [
-        Literal,Ident,Subtract,Divide,Addition,Multiply,Remainder,Equal,
-        NotEqual,LessThan,LessThanOrEqual,GreaterThan,GreaterThanOrEqual,LogicalAnd,LogicalNot,
-        LogicalOr,Loop,Assign,Negate,Dereference,AddressOf,Call,If,FieldAccess, PathAccess
-    ],
-    (TypedExpr::Block { block } => block.ty.clone())
-);
-
-macro_rules! impl_span_for_enum {
-    (
-        $enum_name:ident,
-        [ $($common_variant:ident),* $(,)? ],
-        ($($special_arm:tt)*)
-    ) => {
-        impl $enum_name {
-            pub fn span(&self) -> Span {
-                match self {
-                    // 处理所有通用变体
-                    $( $enum_name::$common_variant { span, .. } => *span, )*
-                    // 插入特殊分支
-                    $($special_arm)*
-                }
-            }
-        }
-    };
-}
-
-impl_span_for_enum!(
-    TypedExpr,
-    [
-        Literal, Ident, Addition, Subtract, Multiply, Divide, Remainder,
-        Equal, NotEqual, LessThan, LessThanOrEqual, GreaterThan, GreaterThanOrEqual,
-        LogicalAnd, LogicalOr, LogicalNot, Assign, Negate, Dereference, AddressOf,
-        Call, If, Loop, FieldAccess, PathAccess
-    ],
-    (TypedExpr::Block { block } => block.span)
-);
-
-impl_span_for_enum!(
-    TypedStmt,
-    [
-        Let, Return, Break, Continue
-    ],
-    (TypedStmt::Expr(expr) => expr.span())
-);

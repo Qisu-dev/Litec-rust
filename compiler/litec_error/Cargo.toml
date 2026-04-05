@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-annotate-snippets = "0.12.5"
+annotate-snippets = "0.12.11"
 litec_span = { path = "../litec_span" }
 litec_ast = { path = "../litec_ast" }
 

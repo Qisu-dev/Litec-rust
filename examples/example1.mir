@@ -1,0 +1,1691 @@
+MirCrate {
+    items: [
+        Extern(
+            MirExtern {
+                def_id: DefId {
+                    index: 0,
+                    kind: Extern,
+                },
+                visibility: Private,
+                name: 'extern',
+                abi: Lite,
+                items: [
+                    Function(
+                        MirExternFunction {
+                            def_id: DefId {
+                                index: 20,
+                                kind: Intrinsic,
+                            },
+                            name: 'printf',
+                            params: [
+                                MirParam {
+                                    def_id: DefId {
+                                        index: 23,
+                                        kind: Local,
+                                    },
+                                    name: 'fmt',
+                                    ty: Str,
+                                    span: Span {
+                                        start: Location {
+                                            line: 1,
+                                            column: 14,
+                                            offset: 28,
+                                        },
+                                        end: Location {
+                                            line: 1,
+                                            column: 22,
+                                            offset: 36,
+                                        },
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                },
+                            ],
+                            is_variadic: true,
+                            return_ty: Some(
+                                Int(
+                                    Signed(
+                                        I32,
+                                    ),
+                                ),
+                            ),
+                            span: Span {
+                                start: Location {
+                                    line: 1,
+                                    column: 4,
+                                    offset: 18,
+                                },
+                                end: Location {
+                                    line: 1,
+                                    column: 36,
+                                    offset: 50,
+                                },
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                    ),
+                    Function(
+                        MirExternFunction {
+                            def_id: DefId {
+                                index: 21,
+                                kind: Intrinsic,
+                            },
+                            name: 'malloc',
+                            params: [
+                                MirParam {
+                                    def_id: DefId {
+                                        index: 24,
+                                        kind: Local,
+                                    },
+                                    name: 'size',
+                                    ty: Int(
+                                        Unsigned(
+                                            Usize,
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: Location {
+                                            line: 2,
+                                            column: 14,
+                                            offset: 66,
+                                        },
+                                        end: Location {
+                                            line: 2,
+                                            column: 25,
+                                            offset: 77,
+                                        },
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                },
+                            ],
+                            is_variadic: false,
+                            return_ty: Some(
+                                Ptr(
+                                    Int(
+                                        Unsigned(
+                                            U8,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                            span: Span {
+                                start: Location {
+                                    line: 2,
+                                    column: 4,
+                                    offset: 56,
+                                },
+                                end: Location {
+                                    line: 2,
+                                    column: 38,
+                                    offset: 90,
+                                },
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                    ),
+                ],
+                span: Span {
+                    start: Location {
+                        line: 0,
+                        column: 0,
+                        offset: 0,
+                    },
+                    end: Location {
+                        line: 3,
+                        column: 1,
+                        offset: 93,
+                    },
+                    file: FileId(
+                        0,
+                    ),
+                },
+            },
+        ),
+        Function(
+            MirFunction {
+                def_id: DefId {
+                    index: 22,
+                    kind: Function,
+                },
+                local_decls: [
+                    LocalDecl {
+                        ty: Ptr(
+                            Int(
+                                Unsigned(
+                                    U8,
+                                ),
+                            ),
+                        ),
+                        mutability: Const,
+                        name: Some(
+                            'ptr',
+                        ),
+                        span: Span {
+                            start: Location {
+                                line: 6,
+                                column: 4,
+                                offset: 114,
+                            },
+                            end: Location {
+                                line: 6,
+                                column: 32,
+                                offset: 142,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                    LocalDecl {
+                        ty: Int(
+                            Signed(
+                                I32,
+                            ),
+                        ),
+                        mutability: Const,
+                        name: None,
+                        span: Span {
+                            start: Location {
+                                line: 6,
+                                column: 21,
+                                offset: 131,
+                            },
+                            end: Location {
+                                line: 6,
+                                column: 22,
+                                offset: 132,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                    LocalDecl {
+                        ty: Int(
+                            Unsigned(
+                                Usize,
+                            ),
+                        ),
+                        mutability: Const,
+                        name: None,
+                        span: Span {
+                            start: Location {
+                                line: 6,
+                                column: 21,
+                                offset: 131,
+                            },
+                            end: Location {
+                                line: 6,
+                                column: 31,
+                                offset: 141,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                    LocalDecl {
+                        ty: Ptr(
+                            Int(
+                                Unsigned(
+                                    U8,
+                                ),
+                            ),
+                        ),
+                        mutability: Const,
+                        name: None,
+                        span: Span {
+                            start: Location {
+                                line: 6,
+                                column: 20,
+                                offset: 130,
+                            },
+                            end: Location {
+                                line: 6,
+                                column: 32,
+                                offset: 142,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                    LocalDecl {
+                        ty: Int(
+                            Signed(
+                                I32,
+                            ),
+                        ),
+                        mutability: Const,
+                        name: None,
+                        span: Span {
+                            start: Location {
+                                line: 7,
+                                column: 11,
+                                offset: 156,
+                            },
+                            end: Location {
+                                line: 7,
+                                column: 12,
+                                offset: 157,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                    LocalDecl {
+                        ty: Int(
+                            Unsigned(
+                                U8,
+                            ),
+                        ),
+                        mutability: Const,
+                        name: None,
+                        span: Span {
+                            start: Location {
+                                line: 7,
+                                column: 11,
+                                offset: 156,
+                            },
+                            end: Location {
+                                line: 7,
+                                column: 18,
+                                offset: 163,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                    LocalDecl {
+                        ty: Str,
+                        mutability: Const,
+                        name: None,
+                        span: Span {
+                            start: Location {
+                                line: 8,
+                                column: 11,
+                                offset: 177,
+                            },
+                            end: Location {
+                                line: 8,
+                                column: 17,
+                                offset: 183,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                    LocalDecl {
+                        ty: Int(
+                            Signed(
+                                I32,
+                            ),
+                        ),
+                        mutability: Const,
+                        name: None,
+                        span: Span {
+                            start: Location {
+                                line: 8,
+                                column: 10,
+                                offset: 176,
+                            },
+                            end: Location {
+                                line: 8,
+                                column: 24,
+                                offset: 190,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                    LocalDecl {
+                        ty: Unit,
+                        mutability: Const,
+                        name: None,
+                        span: Span {
+                            start: Location {
+                                line: 5,
+                                column: 10,
+                                offset: 107,
+                            },
+                            end: Location {
+                                line: 10,
+                                column: 0,
+                                offset: 194,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                ],
+                basic_blocks: [
+                    BasicBlock {
+                        statements: [
+                            Statement {
+                                span: Span {
+                                    start: Location {
+                                        line: 6,
+                                        column: 21,
+                                        offset: 131,
+                                    },
+                                    end: Location {
+                                        line: 6,
+                                        column: 22,
+                                        offset: 132,
+                                    },
+                                    file: FileId(
+                                        0,
+                                    ),
+                                },
+                                kind: Assign {
+                                    place: Place {
+                                        local: Local(
+                                            1,
+                                        ),
+                                        projection: [],
+                                        ty: Int(
+                                            Signed(
+                                                I32,
+                                            ),
+                                        ),
+                                    },
+                                    rvalue: Use(
+                                        Constant(
+                                            Constant {
+                                                kind: Literal {
+                                                    value: Int {
+                                                        value: 4,
+                                                        kind: Signed(
+                                                            I32,
+                                                        ),
+                                                    },
+                                                    ty: Int(
+                                                        Signed(
+                                                            I32,
+                                                        ),
+                                                    ),
+                                                },
+                                                span: Span {
+                                                    start: Location {
+                                                        line: 6,
+                                                        column: 21,
+                                                        offset: 131,
+                                                    },
+                                                    end: Location {
+                                                        line: 6,
+                                                        column: 22,
+                                                        offset: 132,
+                                                    },
+                                                    file: FileId(
+                                                        0,
+                                                    ),
+                                                },
+                                            },
+                                        ),
+                                    ),
+                                },
+                            },
+                            Statement {
+                                span: Span {
+                                    start: Location {
+                                        line: 6,
+                                        column: 21,
+                                        offset: 131,
+                                    },
+                                    end: Location {
+                                        line: 6,
+                                        column: 31,
+                                        offset: 141,
+                                    },
+                                    file: FileId(
+                                        0,
+                                    ),
+                                },
+                                kind: Assign {
+                                    place: Place {
+                                        local: Local(
+                                            2,
+                                        ),
+                                        projection: [],
+                                        ty: Int(
+                                            Unsigned(
+                                                Usize,
+                                            ),
+                                        ),
+                                    },
+                                    rvalue: Cast(
+                                        SignExtend,
+                                        Place {
+                                            local: Local(
+                                                1,
+                                            ),
+                                            projection: [],
+                                            ty: Int(
+                                                Signed(
+                                                    I32,
+                                                ),
+                                            ),
+                                        },
+                                    ),
+                                },
+                            },
+                        ],
+                        terminator: Terminator {
+                            kind: Call {
+                                function: DefId {
+                                    index: 21,
+                                    kind: Intrinsic,
+                                },
+                                args: [
+                                    Copy(
+                                        Place {
+                                            local: Local(
+                                                2,
+                                            ),
+                                            projection: [],
+                                            ty: Int(
+                                                Unsigned(
+                                                    Usize,
+                                                ),
+                                            ),
+                                        },
+                                    ),
+                                ],
+                                destination: Place {
+                                    local: Local(
+                                        3,
+                                    ),
+                                    projection: [],
+                                    ty: Ptr(
+                                        Int(
+                                            Unsigned(
+                                                U8,
+                                            ),
+                                        ),
+                                    ),
+                                },
+                                target: BasicBlockId(
+                                    1,
+                                ),
+                            },
+                            span: Span {
+                                start: Location {
+                                    line: 6,
+                                    column: 20,
+                                    offset: 130,
+                                },
+                                end: Location {
+                                    line: 6,
+                                    column: 32,
+                                    offset: 142,
+                                },
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                    },
+                    BasicBlock {
+                        statements: [
+                            Statement {
+                                span: Span {
+                                    start: Location {
+                                        line: 6,
+                                        column: 4,
+                                        offset: 114,
+                                    },
+                                    end: Location {
+                                        line: 6,
+                                        column: 32,
+                                        offset: 142,
+                                    },
+                                    file: FileId(
+                                        0,
+                                    ),
+                                },
+                                kind: Assign {
+                                    place: Place {
+                                        local: Local(
+                                            0,
+                                        ),
+                                        projection: [],
+                                        ty: Ptr(
+                                            Int(
+                                                Unsigned(
+                                                    U8,
+                                                ),
+                                            ),
+                                        ),
+                                    },
+                                    rvalue: Use(
+                                        Copy(
+                                            Place {
+                                                local: Local(
+                                                    3,
+                                                ),
+                                                projection: [],
+                                                ty: Ptr(
+                                                    Int(
+                                                        Unsigned(
+                                                            U8,
+                                                        ),
+                                                    ),
+                                                ),
+                                            },
+                                        ),
+                                    ),
+                                },
+                            },
+                            Statement {
+                                span: Span {
+                                    start: Location {
+                                        line: 7,
+                                        column: 11,
+                                        offset: 156,
+                                    },
+                                    end: Location {
+                                        line: 7,
+                                        column: 12,
+                                        offset: 157,
+                                    },
+                                    file: FileId(
+                                        0,
+                                    ),
+                                },
+                                kind: Assign {
+                                    place: Place {
+                                        local: Local(
+                                            4,
+                                        ),
+                                        projection: [],
+                                        ty: Int(
+                                            Signed(
+                                                I32,
+                                            ),
+                                        ),
+                                    },
+                                    rvalue: Use(
+                                        Constant(
+                                            Constant {
+                                                kind: Literal {
+                                                    value: Int {
+                                                        value: 1,
+                                                        kind: Signed(
+                                                            I32,
+                                                        ),
+                                                    },
+                                                    ty: Int(
+                                                        Signed(
+                                                            I32,
+                                                        ),
+                                                    ),
+                                                },
+                                                span: Span {
+                                                    start: Location {
+                                                        line: 7,
+                                                        column: 11,
+                                                        offset: 156,
+                                                    },
+                                                    end: Location {
+                                                        line: 7,
+                                                        column: 12,
+                                                        offset: 157,
+                                                    },
+                                                    file: FileId(
+                                                        0,
+                                                    ),
+                                                },
+                                            },
+                                        ),
+                                    ),
+                                },
+                            },
+                            Statement {
+                                span: Span {
+                                    start: Location {
+                                        line: 7,
+                                        column: 11,
+                                        offset: 156,
+                                    },
+                                    end: Location {
+                                        line: 7,
+                                        column: 18,
+                                        offset: 163,
+                                    },
+                                    file: FileId(
+                                        0,
+                                    ),
+                                },
+                                kind: Assign {
+                                    place: Place {
+                                        local: Local(
+                                            5,
+                                        ),
+                                        projection: [],
+                                        ty: Int(
+                                            Unsigned(
+                                                U8,
+                                            ),
+                                        ),
+                                    },
+                                    rvalue: Cast(
+                                        Truncate,
+                                        Place {
+                                            local: Local(
+                                                4,
+                                            ),
+                                            projection: [],
+                                            ty: Int(
+                                                Signed(
+                                                    I32,
+                                                ),
+                                            ),
+                                        },
+                                    ),
+                                },
+                            },
+                            Statement {
+                                span: Span {
+                                    start: Location {
+                                        line: 7,
+                                        column: 4,
+                                        offset: 149,
+                                    },
+                                    end: Location {
+                                        line: 7,
+                                        column: 18,
+                                        offset: 163,
+                                    },
+                                    file: FileId(
+                                        0,
+                                    ),
+                                },
+                                kind: Assign {
+                                    place: Place {
+                                        local: Local(
+                                            0,
+                                        ),
+                                        projection: [
+                                            Deref,
+                                        ],
+                                        ty: Int(
+                                            Unsigned(
+                                                U8,
+                                            ),
+                                        ),
+                                    },
+                                    rvalue: Use(
+                                        Copy(
+                                            Place {
+                                                local: Local(
+                                                    5,
+                                                ),
+                                                projection: [],
+                                                ty: Int(
+                                                    Unsigned(
+                                                        U8,
+                                                    ),
+                                                ),
+                                            },
+                                        ),
+                                    ),
+                                },
+                            },
+                            Statement {
+                                span: Span {
+                                    start: Location {
+                                        line: 8,
+                                        column: 11,
+                                        offset: 177,
+                                    },
+                                    end: Location {
+                                        line: 8,
+                                        column: 17,
+                                        offset: 183,
+                                    },
+                                    file: FileId(
+                                        0,
+                                    ),
+                                },
+                                kind: Assign {
+                                    place: Place {
+                                        local: Local(
+                                            6,
+                                        ),
+                                        projection: [],
+                                        ty: Str,
+                                    },
+                                    rvalue: Use(
+                                        Constant(
+                                            Constant {
+                                                kind: Literal {
+                                                    value: Str(
+                                                        '%d
+                                                        ',
+                                                    ),
+                                                    ty: Str,
+                                                },
+                                                span: Span {
+                                                    start: Location {
+                                                        line: 8,
+                                                        column: 11,
+                                                        offset: 177,
+                                                    },
+                                                    end: Location {
+                                                        line: 8,
+                                                        column: 17,
+                                                        offset: 183,
+                                                    },
+                                                    file: FileId(
+                                                        0,
+                                                    ),
+                                                },
+                                            },
+                                        ),
+                                    ),
+                                },
+                            },
+                        ],
+                        terminator: Terminator {
+                            kind: Call {
+                                function: DefId {
+                                    index: 20,
+                                    kind: Intrinsic,
+                                },
+                                args: [
+                                    Move(
+                                        Place {
+                                            local: Local(
+                                                6,
+                                            ),
+                                            projection: [],
+                                            ty: Str,
+                                        },
+                                    ),
+                                    Copy(
+                                        Place {
+                                            local: Local(
+                                                0,
+                                            ),
+                                            projection: [
+                                                Deref,
+                                            ],
+                                            ty: Int(
+                                                Unsigned(
+                                                    U8,
+                                                ),
+                                            ),
+                                        },
+                                    ),
+                                ],
+                                destination: Place {
+                                    local: Local(
+                                        7,
+                                    ),
+                                    projection: [],
+                                    ty: Int(
+                                        Signed(
+                                            I32,
+                                        ),
+                                    ),
+                                },
+                                target: BasicBlockId(
+                                    2,
+                                ),
+                            },
+                            span: Span {
+                                start: Location {
+                                    line: 8,
+                                    column: 10,
+                                    offset: 176,
+                                },
+                                end: Location {
+                                    line: 8,
+                                    column: 24,
+                                    offset: 190,
+                                },
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                    },
+                    BasicBlock {
+                        statements: [],
+                        terminator: Terminator {
+                            kind: Return {
+                                value: Move(
+                                    Place {
+                                        local: Local(
+                                            8,
+                                        ),
+                                        projection: [],
+                                        ty: Unit,
+                                    },
+                                ),
+                                is_explicit: false,
+                            },
+                            span: Span {
+                                start: Location {
+                                    line: 5,
+                                    column: 0,
+                                    offset: 97,
+                                },
+                                end: Location {
+                                    line: 10,
+                                    column: 0,
+                                    offset: 194,
+                                },
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                    },
+                ],
+                args: [],
+                return_ty: Int(
+                    Signed(
+                        I32,
+                    ),
+                ),
+                span: Span {
+                    start: Location {
+                        line: 5,
+                        column: 0,
+                        offset: 97,
+                    },
+                    end: Location {
+                        line: 10,
+                        column: 0,
+                        offset: 194,
+                    },
+                    file: FileId(
+                        0,
+                    ),
+                },
+            },
+        ),
+    ],
+    globals: {},
+    builtin: Builtin {
+        types: BuiltinTypes {
+            i8: DefId {
+                index: 0,
+                kind: BuiltinType,
+            },
+            i16: DefId {
+                index: 1,
+                kind: BuiltinType,
+            },
+            i32: DefId {
+                index: 2,
+                kind: BuiltinType,
+            },
+            i64: DefId {
+                index: 3,
+                kind: BuiltinType,
+            },
+            i128: DefId {
+                index: 4,
+                kind: BuiltinType,
+            },
+            isize: DefId {
+                index: 5,
+                kind: BuiltinType,
+            },
+            u8: DefId {
+                index: 6,
+                kind: BuiltinType,
+            },
+            u16: DefId {
+                index: 7,
+                kind: BuiltinType,
+            },
+            u32: DefId {
+                index: 8,
+                kind: BuiltinType,
+            },
+            u64: DefId {
+                index: 9,
+                kind: BuiltinType,
+            },
+            u128: DefId {
+                index: 10,
+                kind: BuiltinType,
+            },
+            usize: DefId {
+                index: 11,
+                kind: BuiltinType,
+            },
+            f32: DefId {
+                index: 12,
+                kind: BuiltinType,
+            },
+            f64: DefId {
+                index: 13,
+                kind: BuiltinType,
+            },
+            bool: DefId {
+                index: 14,
+                kind: BuiltinType,
+            },
+            char: DefId {
+                index: 15,
+                kind: BuiltinType,
+            },
+            str: DefId {
+                index: 16,
+                kind: BuiltinType,
+            },
+            unit: DefId {
+                index: 17,
+                kind: BuiltinType,
+            },
+            never: DefId {
+                index: 18,
+                kind: BuiltinType,
+            },
+        },
+        functions: [
+            BuiltinFunction {
+                name: 'printf',
+                def_id: DefId {
+                    index: 20,
+                    kind: Intrinsic,
+                },
+                params: [
+                    TypedParam {
+                        name: 'fmt',
+                        def_id: DefId {
+                            index: 23,
+                            kind: Local,
+                        },
+                        ty: Str,
+                        span: Span {
+                            start: Location {
+                                line: 1,
+                                column: 14,
+                                offset: 28,
+                            },
+                            end: Location {
+                                line: 1,
+                                column: 22,
+                                offset: 36,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                ],
+                is_variadic: true,
+                ret: Int(
+                    Signed(
+                        I32,
+                    ),
+                ),
+                span: Span {
+                    start: Location {
+                        line: 1,
+                        column: 4,
+                        offset: 18,
+                    },
+                    end: Location {
+                        line: 1,
+                        column: 36,
+                        offset: 50,
+                    },
+                    file: FileId(
+                        0,
+                    ),
+                },
+            },
+            BuiltinFunction {
+                name: 'malloc',
+                def_id: DefId {
+                    index: 21,
+                    kind: Intrinsic,
+                },
+                params: [
+                    TypedParam {
+                        name: 'size',
+                        def_id: DefId {
+                            index: 24,
+                            kind: Local,
+                        },
+                        ty: Int(
+                            Unsigned(
+                                Usize,
+                            ),
+                        ),
+                        span: Span {
+                            start: Location {
+                                line: 2,
+                                column: 14,
+                                offset: 66,
+                            },
+                            end: Location {
+                                line: 2,
+                                column: 25,
+                                offset: 77,
+                            },
+                            file: FileId(
+                                0,
+                            ),
+                        },
+                    },
+                ],
+                is_variadic: false,
+                ret: Ptr(
+                    Int(
+                        Unsigned(
+                            U8,
+                        ),
+                    ),
+                ),
+                span: Span {
+                    start: Location {
+                        line: 2,
+                        column: 4,
+                        offset: 56,
+                    },
+                    end: Location {
+                        line: 2,
+                        column: 38,
+                        offset: 90,
+                    },
+                    file: FileId(
+                        0,
+                    ),
+                },
+            },
+        ],
+    },
+    definitions: [
+        Definition {
+            def_id: DefId {
+                index: 0,
+                kind: BuiltinType,
+            },
+            name: 'i8',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 1,
+                kind: BuiltinType,
+            },
+            name: 'i16',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 2,
+                kind: BuiltinType,
+            },
+            name: 'i32',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 3,
+                kind: BuiltinType,
+            },
+            name: 'i64',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 4,
+                kind: BuiltinType,
+            },
+            name: 'i128',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 5,
+                kind: BuiltinType,
+            },
+            name: 'isize',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 6,
+                kind: BuiltinType,
+            },
+            name: 'u8',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 7,
+                kind: BuiltinType,
+            },
+            name: 'u16',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 8,
+                kind: BuiltinType,
+            },
+            name: 'u32',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 9,
+                kind: BuiltinType,
+            },
+            name: 'u64',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 10,
+                kind: BuiltinType,
+            },
+            name: 'u128',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 11,
+                kind: BuiltinType,
+            },
+            name: 'usize',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 12,
+                kind: BuiltinType,
+            },
+            name: 'f32',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 13,
+                kind: BuiltinType,
+            },
+            name: 'f64',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 14,
+                kind: BuiltinType,
+            },
+            name: 'bool',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 15,
+                kind: BuiltinType,
+            },
+            name: 'char',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 16,
+                kind: BuiltinType,
+            },
+            name: 'str',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 17,
+                kind: BuiltinType,
+            },
+            name: 'unit',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 18,
+                kind: BuiltinType,
+            },
+            name: 'never',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 19,
+                kind: Module,
+            },
+            name: 'crate',
+            span: Span {
+                start: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                end: Location {
+                    line: 0,
+                    column: 0,
+                    offset: 0,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 20,
+                kind: Intrinsic,
+            },
+            name: 'printf',
+            span: Span {
+                start: Location {
+                    line: 1,
+                    column: 4,
+                    offset: 18,
+                },
+                end: Location {
+                    line: 1,
+                    column: 36,
+                    offset: 50,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 21,
+                kind: Intrinsic,
+            },
+            name: 'malloc',
+            span: Span {
+                start: Location {
+                    line: 2,
+                    column: 4,
+                    offset: 56,
+                },
+                end: Location {
+                    line: 2,
+                    column: 38,
+                    offset: 90,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 22,
+                kind: Function,
+            },
+            name: 'main',
+            span: Span {
+                start: Location {
+                    line: 5,
+                    column: 0,
+                    offset: 97,
+                },
+                end: Location {
+                    line: 10,
+                    column: 0,
+                    offset: 194,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 23,
+                kind: Local,
+            },
+            name: 'fmt',
+            span: Span {
+                start: Location {
+                    line: 1,
+                    column: 14,
+                    offset: 28,
+                },
+                end: Location {
+                    line: 1,
+                    column: 22,
+                    offset: 36,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 24,
+                kind: Local,
+            },
+            name: 'size',
+            span: Span {
+                start: Location {
+                    line: 2,
+                    column: 14,
+                    offset: 66,
+                },
+                end: Location {
+                    line: 2,
+                    column: 25,
+                    offset: 77,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+        Definition {
+            def_id: DefId {
+                index: 25,
+                kind: Local,
+            },
+            name: 'ptr',
+            span: Span {
+                start: Location {
+                    line: 6,
+                    column: 4,
+                    offset: 114,
+                },
+                end: Location {
+                    line: 6,
+                    column: 32,
+                    offset: 142,
+                },
+                file: FileId(
+                    0,
+                ),
+            },
+        },
+    ],
+}

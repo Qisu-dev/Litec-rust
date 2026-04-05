@@ -1,1069 +1,1361 @@
-use litec_span::{get_global_string, get_global_string_pool, Span, StringId};
+use litec_error::Diagnostic;
+use litec_hir::{
+    AssignOp, BinOp, IntKind, LiteralIntKind, LiteralValue, Mutability, PosOp, UIntKind, Visibility,
+};
 use litec_mir::{
-    AggregateKind, BasicBlock, BasicBlockId, BinOp, FloatKind, IntKind, Literal, LocalDecl, LocalId, MirFunction, 
-    Operand, Rvalue, Statement, SwitchTargets, Terminator, Ty, UnOp
+    AggregateKind, BasicBlockId, Constant, ConstantKind, Field, GlobalDecl, Local, LocalDecl,
+    MirCrate, MirExtern, MirExternFunction, MirExternItem, MirField, MirFunction, MirItem,
+    MirModule, MirParam, MirStruct, Operand, Place, PlaceElem, Rvalue, Statement, StatementKind,
+    SwitchTargets, Terminator, TerminatorKind,
 };
+use litec_span::{Span, StringId, intern_global};
 use litec_typed_hir::{
-    def_id::DefId, TypedBlock, TypedCrate, TypedExpr, TypedItem, TypedParam, TypedStmt 
+    DefKind, TypedBlock, TypedCrate, TypedExpr, TypedExternItem, TypedField, TypedItem, TypedParam,
+    TypedStmt, def_id::DefId, ty::Ty,
 };
-use litec_hir::LiteralValue;
+use rustc_hash::FxHashMap;
 
-// 直接的类型转换函数
-fn hir_ty_to_mir_ty(ty: &litec_typed_hir::ty::Ty) -> Ty {
-    match ty {
-        litec_typed_hir::ty::Ty::Int(kind) => {
-            let mir_kind = match kind {
-                litec_typed_hir::ty::IntKind::I8 => IntKind::I8,
-                litec_typed_hir::ty::IntKind::I16 => IntKind::I16,
-                litec_typed_hir::ty::IntKind::I32 => IntKind::I32,
-                litec_typed_hir::ty::IntKind::I64 => IntKind::I64,
-                litec_typed_hir::ty::IntKind::I128 => IntKind::I128,
-                litec_typed_hir::ty::IntKind::U8 => IntKind::U8,
-                litec_typed_hir::ty::IntKind::U16 => IntKind::U16,
-                litec_typed_hir::ty::IntKind::U32 => IntKind::U32,
-                litec_typed_hir::ty::IntKind::U64 => IntKind::U64,
-                litec_typed_hir::ty::IntKind::U128 => IntKind::U128,
-                litec_typed_hir::ty::IntKind::Usize => IntKind::Usize,
-                litec_typed_hir::ty::IntKind::Isize => IntKind::Isize,
-                litec_typed_hir::ty::IntKind::Unknown => unreachable!(),
-            };
-            Ty::Int(mir_kind)
-        }
-        litec_typed_hir::ty::Ty::Float(kind) => {
-            let mir_kind = match kind {
-                litec_typed_hir::ty::FloatKind::F32 => FloatKind::F32,
-                litec_typed_hir::ty::FloatKind::F64 => FloatKind::F64,
-                litec_typed_hir::ty::FloatKind::Unknow => unreachable!(),
-            };
-            Ty::Float(mir_kind)
-        }
-        litec_typed_hir::ty::Ty::Bool => Ty::Bool,
-        litec_typed_hir::ty::Ty::Unit => Ty::Unit,
-        litec_typed_hir::ty::Ty::Never => Ty::Never,
-        litec_typed_hir::ty::Ty::Unknown => Ty::Unknown,
-        // 处理其他类型
-        _ => Ty::Unknown,
-    }
-}
-
-struct Builder<'a> {
-    hir: &'a TypedCrate,
-    
-    // 当前构建状态
+pub struct Builder {
+    typed_crate: TypedCrate,
+    // 当前正在构建的函数
     current_function: Option<MirFunction>,
-    current_block: BasicBlockId,
-    next_local_id: usize,
-    next_block_id: usize,
-    
-    // 变量映射
-    local_map: std::collections::HashMap<DefId, LocalId>,
-    
-    // 基本块管理
-    basic_blocks: Vec<BasicBlock>,
-    current_statements: Vec<Statement>,
-    
-    // 控制流管理
-    break_targets: Vec<BasicBlockId>,
-    continue_targets: Vec<BasicBlockId>,
+    // 局部变量到 MIR Local 的映射
+    local_map: FxHashMap<DefId, Local>,
+    // 下一个可用的 Local 索引
+    next_local: usize,
+    // 当前基本块 ID
+    current_block_id: BasicBlockId,
+    // 循环上下文 (循环开始块, break 目标块, continue 目标块, 循环值)
+    loop_context: Vec<(BasicBlockId, BasicBlockId, BasicBlockId, Place)>,
+    diagnostics: Vec<Diagnostic>,
+    globals: FxHashMap<DefId, GlobalDecl>,
 }
 
-impl<'a> Builder<'a> {
-    pub fn new(hir: &'a TypedCrate) -> Self {
+impl Builder {
+    pub fn new(typed_crate: TypedCrate) -> Self {
         Self {
-            hir,
+            typed_crate,
             current_function: None,
-            current_block: BasicBlockId(0),
-            next_local_id: 1, // 0 保留给返回值
-            next_block_id: 1,
-            local_map: Default::default(),
-            basic_blocks: Vec::new(),
-            current_statements: Vec::new(),
-            break_targets: Vec::new(),
-            continue_targets: Vec::new()
+            local_map: FxHashMap::default(),
+            next_local: 0,
+            current_block_id: BasicBlockId(0),
+            loop_context: Vec::new(),
+            diagnostics: Vec::new(),
+            globals: FxHashMap::default(),
         }
     }
 
-    // 主构建入口 - 构建整个 crate 的 MIR
-    pub fn build_crate(mut self) -> Vec<MirFunction> {
-        let mut functions = Vec::new();
-        
-        for item in &self.hir.items {
-            match item {
-                TypedItem::Function { def_id, name, params, return_ty, body, span, .. } => {
-                    let mir_func = self.build_function(
-                        *def_id, *name, params, &hir_ty_to_mir_ty(return_ty), body, *span
-                    );
-                    functions.push(mir_func);
+    pub fn build(mut self) -> MirCrate {
+        let typed_items = std::mem::take(&mut self.typed_crate.items);
+        let mut mir_items = Vec::new();
+        for item in typed_items {
+            if let Some(item) = self.build_item(item) {
+                mir_items.push(item);
+            }
+        }
+        MirCrate {
+            items: mir_items,
+            globals: self.globals,
+            builtin: self.typed_crate.builtin,
+            definitions: self.typed_crate.definitions,
+        }
+    }
+
+    fn build_item(&mut self, item: TypedItem) -> Option<MirItem> {
+        match item {
+            TypedItem::Function {
+                def_id,
+                visibility,
+                name,
+                params,
+                return_ty,
+                body,
+                span,
+            } => Some(MirItem::Function(self.build_function(
+                def_id, visibility, name, params, return_ty, body, span,
+            )?)),
+
+            TypedItem::Struct {
+                def_id,
+                visibility,
+                name,
+                fields,
+                span,
+            } => {
+                // 将结构体信息保存到 MIR 中
+                Some(MirItem::Struct(MirStruct {
+                    def_id,
+                    visibility,
+                    name,
+                    fields: fields
+                        .iter()
+                        .map(|f| MirField {
+                            def_id: f.def_id,
+                            name: f.name,
+                            ty: f.ty.clone(),
+                            visibility: f.visibility,
+                            span: f.span,
+                        })
+                        .collect(),
+                    span,
+                }))
+            }
+
+            TypedItem::Use { .. } => {
+                // Use 语句在 MIR 中不需要生成代码
+                // 它们只在名称解析阶段有用
+                None
+            }
+
+            TypedItem::Module {
+                def_id,
+                visibility,
+                name,
+                items,
+                span,
+            } => {
+                // 递归处理模块中的所有项
+                let mut mir_items = Vec::new();
+                for item in items {
+                    if let Some(mir_item) = self.build_item(item) {
+                        mir_items.push(mir_item);
+                    }
                 }
-                TypedItem::Struct { .. } => {
-                    // 结构体在 MIR 中主要是类型信息，不生成具体的 MIR 函数
-                    // 但可以在这里记录结构体定义以供后续使用
+
+                // 如果模块中有生成的 MIR 项，则返回模块
+                if mir_items.is_empty() {
+                    None
+                } else {
+                    Some(MirItem::Module(MirModule {
+                        def_id,
+                        visibility,
+                        name,
+                        items: mir_items,
+                        span,
+                    }))
+                }
+            }
+
+            TypedItem::Extern {
+                visibility,
+                abi,
+                items,
+                span,
+            } => {
+                // 处理外部函数声明
+                let mut mir_extern_items = Vec::new();
+                for extern_item in items {
+                    match extern_item {
+                        TypedExternItem::Function {
+                            def_id,
+                            name,
+                            params,
+                            is_variadic,
+                            return_ty,
+                            span,
+                        } => {
+                            // 外部函数在 MIR 中不需要生成函数体
+                            // 只需要记录函数签名
+                            mir_extern_items.push(MirExternItem::Function(MirExternFunction {
+                                def_id,
+                                name,
+                                params: params
+                                    .iter()
+                                    .map(|p| MirParam {
+                                        def_id: p.def_id,
+                                        name: p.name,
+                                        ty: p.ty.clone(),
+                                        span: p.span,
+                                    })
+                                    .collect(),
+                                is_variadic: is_variadic,
+                                return_ty: Some(return_ty.clone()),
+                                span,
+                            }));
+                        }
+                    }
+                }
+
+                // 如果有外部项，则返回外部块
+                if mir_extern_items.is_empty() {
+                    None
+                } else {
+                    Some(MirItem::Extern(MirExtern {
+                        def_id: DefId::new(0, DefKind::Extern), // 使用一个虚拟的 def_id
+                        visibility,
+                        name: intern_global("extern"), // 使用固定的名称
+                        abi,
+                        items: mir_extern_items,
+                        span,
+                    }))
                 }
             }
         }
-        
-        functions
     }
 
-    // 构建单个函数
     fn build_function(
         &mut self,
         def_id: DefId,
+        visibility: Visibility,
         name: StringId,
-        params: &[TypedParam],
-        return_ty: &Ty,
-        body: &TypedBlock,
+        params: Vec<TypedParam>,
+        return_ty: Ty,
+        body: TypedBlock,
         span: Span,
-    ) -> MirFunction {
-        // 重置构建器状态
-        self.reset_builder_state();
-
-        // 初始化函数
-        let mut function = MirFunction {
+    ) -> Option<MirFunction> {
+        let mir_function = MirFunction {
             def_id,
-            name,
-            locals: Vec::new(),
+            local_decls: Vec::new(),
             basic_blocks: Vec::new(),
+            args: Vec::with_capacity(params.len()),
+            return_ty: return_ty,
             span,
         };
-        
-        // 创建返回位置 (local 0)
-        function.locals.push(LocalDecl {
-            ty: return_ty.clone(),
-            name: Some(StringId::from("return")),
-            span,
+
+        self.current_function = Some(mir_function);
+        self.local_map.clear();
+        self.next_local = 0;
+
+        for param in &params {
+            let local = self.new_local(param.ty.clone(), Mutability::Const, Some(param.name), span);
+            self.local_map.insert(param.def_id, local);
+            self.current_function.as_mut().unwrap().args.push(local);
+        }
+
+        let entry_block = self.new_basic_block(span);
+        self.set_current_block(entry_block);
+
+        let tail_place = self.build_block(&body);
+
+        self.terminate(Terminator {
+            kind: TerminatorKind::Return {
+                value: Operand::Move(tail_place),
+                is_explicit: false,
+            },
+            span: span,
         });
 
-        // 为参数创建局部变量
-        for param in params {
-            let id = self.alloc_local_id();
-
-            function.locals.push(LocalDecl {
-                ty: hir_ty_to_mir_ty(&param.ty),
-                name: Some(param.name),
-                span: param.span,
-            });
-            
-            self.local_map.insert(param.def_id, id);
-        }
-
-        self.current_function = Some(function);
-        self.start_block(BasicBlockId(0)); // 入口块
-
-        // 构建函数体
-        self.build_block(body);
-
-        let function = self.finish_function();
-
-        if get_global_string(name).unwrap().as_ref() == "main" {
-            return self.process_main_function(function);
-        }
-
-        function
+        let mir_function = self.current_function.take().unwrap();
+        Some(mir_function)
     }
 
-    /// 处理主函数的 MIR 生成
-    fn process_main_function(&self, mut mir_func: MirFunction) -> MirFunction {
-        // 确保主函数有正确的返回类型
-        if let Some(local) = mir_func.locals.first_mut() {
-            // 如果主函数返回 Unit，我们将其改为返回 i32
-            if matches!(local.ty, Ty::Unit) {
-                dbg!("  🔄 将主函数返回类型从 Unit 改为 i32");
-                local.ty = Ty::Int(IntKind::I32);
-            }
-        }
-
-        // 确保主函数有返回语句
-        self.ensure_main_has_return(&mut mir_func);
-
-        mir_func
-    }
-
-    /// 确保主函数有返回语句
-    fn ensure_main_has_return(&self, mir_func: &mut MirFunction) {
-        for bb in &mut mir_func.basic_blocks {
-            if let Some(Terminator::Return { value, span }) = &bb.terminator {
-                // 已经有返回语句，检查返回值
-                if let Operand::Literal(Literal::Unit) = value {
-                    dbg!("  🔄 将主函数返回 Unit 改为返回 0");
-                    // 将 return () 改为 return 0
-                    bb.terminator = Some(Terminator::Return {
-                        value: Operand::Literal(Literal::I32(0)),
-                        span: span.clone(),
-                    });
-                }
-                return;
-            }
-        }
-        
-        // 如果没有返回语句，添加一个返回 0
-        println!("  ➕ 为主函数添加默认返回语句");
-        if let Some(last_bb) = mir_func.basic_blocks.last_mut() {
-            last_bb.terminator = Some(Terminator::Return {
-                value: Operand::Literal(Literal::I32(0)),
-                span: Span::default(),
-            });
-        }
-    }
-
-    fn alloc_local_id(&mut self) -> LocalId {
-        let id = LocalId(self.next_local_id);
-        self.next_local_id += 1;
-        id
-    }
-
-    // 构建语句块
-    fn build_block(&mut self, block: &TypedBlock) {
-        // 构建所有语句
+    fn build_block(&mut self, block: &TypedBlock) -> Place {
         for stmt in &block.stmts {
-            self.build_stmt(stmt);
+            self.build_stmt(&stmt);
         }
-        
-        // 构建尾表达式（如果有）
-        if let Some(expr) = &block.tail {
-            let result = self.build_expr(expr);
-            
-            // 将尾表达式的结果存储到返回位置
-            self.assign(
-                LocalId(0), // 返回位置
-                Rvalue::Use(result),
-                expr.span()
-            );
 
-            self.return_(Operand::Local(LocalId(0)), expr.span());
-        } else if block.stmts.is_empty() || !self.has_terminator() {
-            self.return_(Operand::Literal(Literal::Unit), block.span);
+        if let Some(tail_expr) = &block.tail {
+            let tail_place = self.build_expr(tail_expr);
+            tail_place
+        } else {
+            let tail_place = Place::local(
+                self.new_local(Ty::Unit, Mutability::Const, None, block.span),
+                block.ty.clone(),
+            );
+            tail_place
         }
     }
 
-    // 构建语句
     fn build_stmt(&mut self, stmt: &TypedStmt) {
         match stmt {
-            TypedStmt::Expr(expr) => {
-                // 表达式语句：计算表达式但丢弃结果
-                let _operand = self.build_expr(expr);
+            TypedStmt::Expr(typed_expr) => {
+                // 表达式语句：构建表达式但不使用其结果
+                self.build_expr(typed_expr);
             }
-            TypedStmt::Let { name, def_id, ty, init, span } => {
-                let local_id = self.declare_local(*name, hir_ty_to_mir_ty(ty), *span);
-                self.local_map.insert(*def_id, local_id);
-                
+            TypedStmt::Let {
+                mutable,
+                name,
+                def_id,
+                ty,
+                init,
+                span,
+            } => {
+                // 创建新的局部变量
+                let local = self.new_local(ty.clone(), *mutable, Some(*name), *span);
+                self.local_map.insert(*def_id, local);
+
+                // 如果有初始化表达式，则构建并赋值
                 if let Some(init_expr) = init {
-                    let operand = self.build_expr(init_expr);
-                    self.assign(local_id, Rvalue::Use(operand), init_expr.span());
+                    let init_place = self.build_expr(init_expr);
+                    self.assign(
+                        Place::local(local, init_expr.ty()),
+                        Rvalue::Use(
+                            self.move_or_copy_operand(&init.as_ref().unwrap().ty(), init_place),
+                        ),
+                        *span,
+                    );
                 }
             }
             TypedStmt::Return { value, span } => {
-                let return_value = if let Some(expr) = value {
-                    self.build_expr(expr)
-                } else {
-                    Operand::Literal(Literal::Unit)
+                // 返回语句：构建返回值并终止当前基本块
+                let operand = match value {
+                    Some(expr) => Operand::Copy(self.build_expr(expr)),
+                    None => Operand::Constant(Constant {
+                        kind: ConstantKind::Unit,
+                        span: *span,
+                    }),
                 };
-                self.return_(return_value, *span);
+                self.terminate(Terminator {
+                    kind: TerminatorKind::Return {
+                        value: operand,
+                        is_explicit: true,
+                    },
+                    span: *span,
+                });
             }
-            TypedStmt::Break { value, span } => {
-                if let Some(&target) = self.break_targets.last() {
-                    // 简化处理：break 跳转到循环结束块
-                    if let Some(expr) = value {
-                        let _ = self.build_expr(expr); // 计算表达式但暂时不处理值
-                    }
-                    self.goto(target, *span);
+            TypedStmt::Break { value, ty: _, span } => {
+                // 获取循环上下文中的 break 目标块
+                let break_target = self.loop_context.last().expect("break outside of loop").1;
+
+                // 如果有返回值，则构建并赋值
+                if let Some(expr) = value {
+                    let value_place = self.build_expr(expr);
+                    let result_place = self.loop_context.last().unwrap().3.clone();
+                    self.assign(result_place, Rvalue::Use(Operand::Copy(value_place)), *span);
                 }
+
+                // 跳转到 break 目标块
+                self.terminate(Terminator {
+                    kind: TerminatorKind::Goto {
+                        target: break_target,
+                    },
+                    span: *span,
+                });
             }
-            TypedStmt::Continue { span } => {
-                if let Some(&target) = self.continue_targets.last() {
-                    self.goto(target, *span);
-                }
+            TypedStmt::Continue { ty, span } => {
+                // 获取循环上下文中的 continue 目标块
+                let continue_target = self
+                    .loop_context
+                    .last()
+                    .expect("continue outside of loop")
+                    .2;
+
+                // 跳转到 continue 目标块
+                self.terminate(Terminator {
+                    kind: TerminatorKind::Goto {
+                        target: continue_target,
+                    },
+                    span: *span,
+                });
             }
         }
     }
 
-    // 构建表达式 - 返回操作数
-    fn build_expr(&mut self, expr: &TypedExpr) -> Operand {
+    fn build_expr(&mut self, expr: &TypedExpr) -> Place {
         match expr {
-            // 字面量
-            TypedExpr::Literal { value, ty: _, span } => {
-                self.build_literal(value, *span)
+            TypedExpr::Literal { value, ty, span } => {
+                let place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+                self.assign(
+                    place.clone(),
+                    Rvalue::Use(Operand::Constant(Constant {
+                        kind: ConstantKind::Literal {
+                            value: value.clone(),
+                            ty: ty.clone(),
+                        },
+                        span: *span,
+                    })),
+                    *span,
+                );
+                place
             }
-            
-            // 标识符（变量）
-            TypedExpr::Ident { def_id, ty: _, span: _, .. } => {
-                if let Some(&local_id) = self.local_map.get(def_id) {
-                    Operand::Local(local_id)
-                } else {
-                    // 全局变量或静态变量
-                    Operand::Static(*def_id)
+            TypedExpr::Local { def_id, ty, .. } => {
+                let local = self.local_map.get(&def_id).unwrap();
+                Place::local(*local, ty.clone())
+            }
+            TypedExpr::Global { def_id, ty, span } => {
+                todo!()
+            }
+            TypedExpr::Binary {
+                left,
+                op,
+                right,
+                ty,
+                span,
+            } => {
+                let left_place = self.build_expr(left);
+                let right_place = self.build_expr(right);
+
+                let place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+
+                self.assign(
+                    place.clone(),
+                    Rvalue::BinaryOp(*op, Operand::Copy(left_place), Operand::Copy(right_place)),
+                    *span,
+                );
+
+                place
+            }
+            TypedExpr::Unary {
+                op,
+                operand,
+                ty,
+                span,
+            } => {
+                let opearnd_place = self.build_expr(operand);
+
+                let place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+
+                self.assign(
+                    place.clone(),
+                    Rvalue::UnaryOp(*op, Operand::Copy(opearnd_place)),
+                    *span,
+                );
+
+                place
+            }
+            TypedExpr::Postfix {
+                operand,
+                op,
+                ty,
+                span,
+            } => {
+                let operand_place = self.build_expr(operand);
+                let result_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+
+                // 先保存原始值
+                self.assign(
+                    result_place.clone(),
+                    Rvalue::Use(Operand::Copy(operand_place.clone())),
+                    *span,
+                );
+
+                // 然后执行后缀操作
+                match op {
+                    PosOp::Plus => {
+                        self.assign(
+                            operand_place,
+                            Rvalue::BinaryOp(
+                                BinOp::Add,
+                                Operand::Copy(result_place.clone()),
+                                Operand::Constant(Constant {
+                                    kind: ConstantKind::Literal {
+                                        value: LiteralValue::Int {
+                                            value: 1,
+                                            kind: LiteralIntKind::Signed(IntKind::I32),
+                                        },
+                                        ty: ty.clone(),
+                                    },
+                                    span: *span,
+                                }),
+                            ),
+                            *span,
+                        );
+                    }
+                    PosOp::Sub => {
+                        self.assign(
+                            operand_place,
+                            Rvalue::BinaryOp(
+                                BinOp::Sub,
+                                Operand::Copy(result_place.clone()),
+                                Operand::Constant(Constant {
+                                    kind: ConstantKind::Literal {
+                                        value: LiteralValue::Int {
+                                            value: 1,
+                                            kind: LiteralIntKind::Signed(IntKind::I32),
+                                        },
+                                        ty: ty.clone(),
+                                    },
+                                    span: *span,
+                                }),
+                            ),
+                            *span,
+                        );
+                    }
+                }
+
+                result_place
+            }
+            TypedExpr::Assign {
+                target,
+                op,
+                value,
+                ty,
+                span,
+            } => {
+                let target_place = self.build_expr(target);
+                let value_place = self.build_expr(value);
+
+                match op {
+                    AssignOp::Simple => {
+                        if value.ty().is_copyable() {
+                            // Copy 类型：使用 Copy 操作数
+                            self.assign(
+                                target_place.clone(),
+                                Rvalue::Use(Operand::Copy(value_place)),
+                                *span,
+                            );
+                        } else {
+                            // 非 Copy 类型：使用 Move 操作数
+                            self.assign(
+                                target_place.clone(),
+                                Rvalue::Use(Operand::Move(value_place)),
+                                *span,
+                            );
+                        }
+                    }
+                    _ => {
+                        // 复合赋值：先计算新值，再赋给目标
+                        let temp_place = Place::local(
+                            self.new_local(ty.clone(), Mutability::Const, None, *span),
+                            ty.clone(),
+                        );
+                        self.assign(
+                            temp_place.clone(),
+                            Rvalue::BinaryOp(
+                                self.assign_op_to_bin_op(*op),
+                                Operand::Copy(target_place.clone()),
+                                Operand::Copy(value_place),
+                            ),
+                            *span,
+                        );
+                        self.assign(
+                            target_place.clone(),
+                            Rvalue::Use(Operand::Copy(temp_place)),
+                            *span,
+                        );
+                    }
+                }
+
+                target_place
+            }
+            TypedExpr::AddressOf { expr, ty, span } => {
+                let expr_place = self.build_expr(expr);
+                let address_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Mut, None, *span),
+                    ty.clone(),
+                );
+                self.assign(address_place.clone(), Rvalue::address_of(expr_place), *span);
+                address_place
+            }
+            TypedExpr::Dereference { expr, ty, .. } => {
+                let inner_place = self.build_place(expr); // 递归获取 place
+                Place {
+                    local: inner_place.local,
+                    projection: [inner_place.projection, vec![PlaceElem::Deref]].concat(),
+                    ty: ty.clone(),
                 }
             }
-            
-            // 算术运算
-            TypedExpr::Addition { left, right, ty, span } => {
-                self.build_binary_op(BinOp::Add, left, right, &hir_ty_to_mir_ty(ty), *span)
-            }
-            TypedExpr::Subtract { left, right, ty, span } => {
-                self.build_binary_op(BinOp::Sub, left, right, &hir_ty_to_mir_ty(ty), *span)
-            }
-            TypedExpr::Multiply { left, right, ty, span } => {
-                self.build_binary_op(BinOp::Mul, left, right, &hir_ty_to_mir_ty(ty), *span)
-            }
-            TypedExpr::Divide { left, right, ty, span } => {
-                self.build_binary_op(BinOp::Div, left, right, &hir_ty_to_mir_ty(ty), *span)
-            }
-            TypedExpr::Remainder { left, right, ty, span } => {
-                self.build_binary_op(BinOp::Rem, left, right, &hir_ty_to_mir_ty(ty), *span)
-            }
-            
-            // 比较运算
-            TypedExpr::Equal { left, right, ty: _, span } => {
-                self.build_binary_op(BinOp::Eq, left, right, &Ty::Bool, *span)
-            }
-            TypedExpr::NotEqual { left, right, ty: _, span } => {
-                self.build_binary_op(BinOp::Ne, left, right, &Ty::Bool, *span)
-            }
-            TypedExpr::LessThan { left, right, ty: _, span } => {
-                self.build_binary_op(BinOp::Lt, left, right, &Ty::Bool, *span)
-            }
-            TypedExpr::LessThanOrEqual { left, right, ty: _, span } => {
-                self.build_binary_op(BinOp::Le, left, right, &Ty::Bool, *span)
-            }
-            TypedExpr::GreaterThan { left, right, ty: _, span } => {
-                self.build_binary_op(BinOp::Gt, left, right, &Ty::Bool, *span)
-            }
-            TypedExpr::GreaterThanOrEqual { left, right, ty: _, span } => {
-                self.build_binary_op(BinOp::Ge, left, right, &Ty::Bool, *span)
-            }
-            
-            // 逻辑运算
-            TypedExpr::LogicalAnd { left, right, ty, span } => {
-                self.build_binary_op(BinOp::And, left, right, &hir_ty_to_mir_ty(ty), *span)
-            }
-            TypedExpr::LogicalOr { left, right, ty, span } => {
-                self.build_binary_op(BinOp::Or, left, right, &hir_ty_to_mir_ty(ty), *span)
-            }
-            TypedExpr::LogicalNot { operand, ty, span } => {
-                self.build_unary_op(UnOp::Not, operand, &hir_ty_to_mir_ty(ty), *span)
-            }
-            
-            // 一元运算
-            TypedExpr::Negate { operand, ty, span } => {
-                self.build_unary_op(UnOp::Neg, operand, &hir_ty_to_mir_ty(ty), *span)
-            }
-            
-            // 赋值
-            TypedExpr::Assign { target, value, ty: _, span } => {
-                self.build_assign(target, value, *span)
-            }
-            
-            // 函数调用
-            TypedExpr::Call { callee, args, ty, span } => {
-                self.build_call(*callee, args, &hir_ty_to_mir_ty(ty), *span)
-            }
-            
-            // 控制流
-            TypedExpr::If { condition, then_branch, else_branch, ty, span } => {
-                self.build_if(condition, then_branch, else_branch, &hir_ty_to_mir_ty(ty), *span)
-            }
-            TypedExpr::Loop { body, ty: _, span } => {
-                self.build_loop(body, *span)
-            }
-            
-            // 块表达式
-            TypedExpr::Block { block } => {
-                self.build_block_expr(block)
-            }
-            
-            // 其他表达式（简化处理）
-            TypedExpr::Dereference { expr, ty, span } => {
-                // 简化：直接返回操作数
-                self.build_expr(expr)
-            }
-            TypedExpr::AddressOf { base, mutable: _, ty, span } => {
-                // 简化：直接返回操作数
-                self.build_expr(base)
-            }
-            TypedExpr::FieldAccess { base, field: _, def_id: _, ty, span } => {
-                // 简化：直接返回基操作数
-                self.build_expr(base)
-            }
-            TypedExpr::PathAccess { def_id, ty: _, span } => {
-                // 全局路径访问
-                Operand::Static(*def_id)
-            }
-        }
-    }
-
-    // === 具体表达式构建方法 ===
-
-    fn build_literal(&self, value: &LiteralValue, span: Span) -> Operand {
-        match value {
-            LiteralValue::Int { value } => {
-                        match value {
-                            litec_hir::LitIntValue::I8(value) => Operand::Literal(Literal::I8(*value)),
-                            litec_hir::LitIntValue::I16(value) => Operand::Literal(Literal::I16(*value)),
-                            litec_hir::LitIntValue::I32(value) => Operand::Literal(Literal::I32(*value)),
-                            litec_hir::LitIntValue::I64(value) => Operand::Literal(Literal::I64(*value)),
-                            litec_hir::LitIntValue::I128(value) => Operand::Literal(Literal::I128(*value)),
-                            litec_hir::LitIntValue::Isize(value) => Operand::Literal(Literal::Isize(*value)),
-                            litec_hir::LitIntValue::U8(value) => Operand::Literal(Literal::U8(*value)),
-                            litec_hir::LitIntValue::U16(value) => Operand::Literal(Literal::U16(*value)),
-                            litec_hir::LitIntValue::U32(value) => Operand::Literal(Literal::U32(*value)),
-                            litec_hir::LitIntValue::U64(value) => Operand::Literal(Literal::U64(*value)),
-                            litec_hir::LitIntValue::U128(value) => Operand::Literal(Literal::U128(*value)),
-                            litec_hir::LitIntValue::Usize => Operand::Literal(Literal::Usize(*value as usize)),
-                            litec_hir::LitIntValue::Unknown => unreachable!(),
-                        }
-                    },
-            LiteralValue::Float { value, kind } => {
-                        match kind {
-                            litec_hir::LitFloatValue::F32 => Operand::Literal(Literal::F32(*value as f32)),
-                            litec_hir::LitFloatValue::F64 => Operand::Literal(Literal::F64(*value as f64)),
-                            litec_hir::LitFloatValue::Unknown => unreachable!(),
-                        }
-                    },
-            LiteralValue::Bool(value) => Operand::Literal(Literal::Bool(*value)),
-            LiteralValue::Unit => Operand::Literal(Literal::Unit),
-            LiteralValue::Str(string_id) => Operand::Literal(Literal::Str(*string_id)),
-            LiteralValue::Char(c) => Operand::Literal(Literal::Char(*c)),
-        }
-    }
-
-    fn build_binary_op(
-        &mut self,
-        op: BinOp,
-        left: &TypedExpr,
-        right: &TypedExpr,
-        result_ty: &Ty,
-        span: Span,
-    ) -> Operand {
-        let left_op = self.build_expr(left);
-        let right_op = self.build_expr(right);
-        let temp = self.new_temp(result_ty.clone(), span);
-        
-        self.assign(temp, Rvalue::Binary(op, left_op, right_op), span);
-        Operand::Local(temp)
-    }
-
-    fn build_unary_op(
-        &mut self,
-        op: UnOp,
-        operand: &TypedExpr,
-        result_ty: &Ty,
-        span: Span,
-    ) -> Operand {
-        let op_operand = self.build_expr(operand);
-        let temp = self.new_temp(result_ty.clone(), span);
-        
-        self.assign(temp, Rvalue::Unary(op, op_operand), span);
-        Operand::Local(temp)
-    }
-
-    fn build_assign(
-        &mut self,
-        target: &TypedExpr,
-        value: &TypedExpr,
-        span: Span,
-    ) -> Operand {
-        let value_op = self.build_expr(value);
-        
-        // 简化：假设目标是一个局部变量
-        if let TypedExpr::Ident { def_id, .. } = target {
-            if let Some(&local_id) = self.local_map.get(def_id) {
-                self.assign(local_id, Rvalue::Use(value_op), span);
-                return Operand::Literal(Literal::Unit);
-            }
-        }
-        
-        // 如果目标不是简单局部变量，返回单位值
-        Operand::Literal(Literal::Unit)
-    }
-
-    fn build_call(
-        &mut self,
-        callee: DefId,
-        args: &[TypedExpr],
-        result_ty: &Ty,
-        span: Span,
-    ) -> Operand {
-        let arg_operands: Vec<Operand> = args.iter()
-            .map(|arg| self.build_expr(arg))
-            .collect();
-        
-        // 创建临时变量存储结果
-        let temp = self.new_temp(result_ty.clone(), span);
-        
-        // 简化处理：将函数调用视为聚合操作
-        self.assign(
-            temp,
-            Rvalue::Aggregate(AggregateKind::Adt(callee), arg_operands),
-            span,
-        );
-        
-        Operand::Local(temp)
-    }
-
-    fn build_if(&mut self, condition: &TypedExpr, then_branch: &TypedBlock, else_branch: &Option<Box<TypedExpr>>, result_ty: &Ty, span: Span) -> Operand {
-        let cond_op = self.build_expr(condition);
-        
-        let then_block = self.new_block();
-        let else_block = self.new_block();
-        let merge_block = self.new_block();
-        
-        let result_temp = self.new_temp(result_ty.clone(), span);
-        
-        // 条件跳转 - 设置当前块的终结符
-        self.switch(
-            cond_op,
-            SwitchTargets {
-                values: vec![1], // true = 1
-                targets: vec![then_block],
-                otherwise: else_block,
-            },
-            span,
-        );
-
-        // 构建 then 分支
-        self.start_block(then_block);
-        let then_result = self.build_block_expr(then_branch);
-        self.assign(result_temp, Rvalue::Use(then_result), then_branch.span);
-        self.goto(merge_block, then_branch.span);
-
-        // 构建 else 分支  
-        self.start_block(else_block);
-        let else_result = if let Some(else_expr) = else_branch {
-            self.build_expr(else_expr)
-        } else {
-            Operand::Literal(Literal::Unit)
-        };
-        self.assign(result_temp, Rvalue::Use(else_result), span);
-        self.goto(merge_block, span);
-
-        // 构建合并块
-        self.start_block(merge_block);
-
-        Operand::Local(result_temp)
-    }
-
-    fn build_loop(&mut self, body: &TypedBlock, span: Span) -> Operand {
-        let loop_header = self.new_block();
-        let loop_body = self.new_block();
-        let loop_end = self.new_block();
-        
-        // 设置循环控制目标
-        self.break_targets.push(loop_end);
-        self.continue_targets.push(loop_header);
-        
-        // 跳转到循环头
-        self.goto(loop_header, span);
-        
-        // 循环头
-        self.start_block(loop_header);
-        self.goto(loop_body, span);
-        
-        // 循环体
-        self.start_block(loop_body);
-        self.build_block(body);
-        // 循环体结束后跳回头部（除非有 break）
-        if !self.has_terminator() {
-            self.goto(loop_header, body.span);
-        }
-        
-        // 循环结束块
-        self.start_block(loop_end);
-        
-        // 恢复循环控制目标
-        self.break_targets.pop();
-        self.continue_targets.pop();
-        
-        // loop 表达式返回 never 类型
-        Operand::Literal(Literal::Never)
-    }
-
-    fn build_block_expr(&mut self, block: &TypedBlock) -> Operand {
-        // 构建语句
-        for stmt in &block.stmts {
-            self.build_stmt(stmt);
-        }
-        
-        // 返回尾表达式的结果
-        if let Some(expr) = &block.tail {
-            self.build_expr(expr)
-        } else {
-            Operand::Literal(Literal::Unit)
-        }
-    }
-
-    // === 基础构建方法 ===
-
-    fn reset_builder_state(&mut self) {
-        self.current_function = None;
-        self.current_block = BasicBlockId(0);
-        self.next_local_id = 1;
-        self.next_block_id = 1;
-        self.local_map.clear();
-        self.basic_blocks.clear();
-        self.current_statements.clear();
-        self.break_targets.clear();
-        self.continue_targets.clear();
-    }
-
-    fn start_block(&mut self, id: BasicBlockId) {
-        // 如果切换到新块，完成当前块
-        if id != self.current_block {
-            self.finish_block();
-        }
-        self.current_block = id;
-        self.current_statements.clear();
-    }
-
-    fn finish_block(&mut self) {
-        // 检查是否已经存在这个块
-        let existing_block = self.basic_blocks.iter()
-            .position(|b| b.id == self.current_block);
-        
-        if let Some(index) = existing_block {
-            // 更新已存在的块
-            let block = &mut self.basic_blocks[index];
-            block.statements.extend(std::mem::take(&mut self.current_statements));
-        } else if !self.current_statements.is_empty() || self.has_terminator_for_current_block() {
-            // 创建新块
-            let block = BasicBlock {
-                id: self.current_block,
-                statements: std::mem::take(&mut self.current_statements),
-                terminator: self.get_terminator_for_current_block(),
-            };
-            self.basic_blocks.push(block);
-        }
-    }
-
-    fn has_terminator_for_current_block(&self) -> bool {
-        self.basic_blocks.iter()
-            .find(|b| b.id == self.current_block)
-            .and_then(|b| b.terminator.as_ref())
-            .is_some()
-    }
-
-    fn get_terminator_for_current_block(&self) -> Option<Terminator> {
-        self.basic_blocks.iter()
-            .find(|b| b.id == self.current_block)
-            .and_then(|b| b.terminator.clone())
-    }
-
-    fn has_terminator(&self) -> bool {
-        // 检查当前块是否已经有终结符
-        self.basic_blocks.iter()
-            .find(|b| b.id == self.current_block)
-            .and_then(|b| b.terminator.as_ref())
-            .is_some()
-    }
-
-    fn declare_local(&mut self, name: StringId, ty: Ty, span: Span) -> LocalId {
-        let local_id = self.next_local_id;
-        self.next_local_id += 1;
-
-        if let Some(function) = &mut self.current_function {
-            function.locals.push(LocalDecl {
+            TypedExpr::Call {
+                callee,
+                args,
                 ty,
-                name: Some(name),
+                span,
+            } => {
+                let mut operands = Vec::new();
+                for arg in args.iter() {
+                    let arg_place = self.build_expr(arg);
+
+                    let operand = if arg.ty().is_copyable() {
+                        Operand::Copy(arg_place)
+                    } else {
+                        Operand::Move(arg_place)
+                    };
+                    operands.push(operand);
+                }
+
+                let result_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+                let next_block = self.new_basic_block(*span);
+
+                self.terminate(Terminator {
+                    kind: TerminatorKind::Call {
+                        function: *callee,
+                        args: operands,
+                        destination: result_place.clone(),
+                        target: next_block,
+                    },
+                    span: *span,
+                });
+
+                self.set_current_block(next_block);
+                result_place
+            }
+            TypedExpr::Block {
+                block,
+                ty: _,
+                span: _,
+            } => {
+                let result_place = self.build_block(&block);
+
+                result_place
+            }
+            TypedExpr::If {
+                condition,
+                then_branch,
+                else_branch,
+                ty,
+                span,
+            } => {
+                let then_block = self.new_basic_block(*span);
+                let else_block = self.new_basic_block(*span);
+                let merge_block = self.new_basic_block(*span);
+
+                // 构建条件表达式
+                let condition_place = self.build_expr(condition);
+
+                // 设置当前块的终止器为条件跳转
+                self.terminate(Terminator {
+                    kind: TerminatorKind::SwitchInt {
+                        discr: Operand::Copy(condition_place),
+                        targets: SwitchTargets::if_else(then_block, else_block),
+                    },
+                    span: *span,
+                });
+
+                // 构建then分支
+                self.set_current_block(then_block);
+                let then_place = self.build_block(then_branch);
+
+                // 跳转到merge块
+                if self.current_block_terminator().is_none() {
+                    self.terminate(Terminator {
+                        kind: TerminatorKind::Goto {
+                            target: merge_block,
+                        },
+                        span: *span,
+                    });
+                }
+
+                // 构建else分支
+                self.set_current_block(else_block);
+                let else_place = match else_branch {
+                    Some(else_expr) => self.build_expr(else_expr),
+                    None => Place::local(
+                        self.new_local(ty.clone(), Mutability::Const, None, *span),
+                        ty.clone(),
+                    ),
+                };
+
+                // 跳转到merge块
+                if self.current_block_terminator().is_none() {
+                    self.terminate(Terminator {
+                        kind: TerminatorKind::Goto {
+                            target: merge_block,
+                        },
+                        span: *span,
+                    });
+                }
+
+                // 在merge块创建结果变量
+                self.set_current_block(merge_block);
+                let result_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+
+                // 根据是否有else分支决定如何赋值
+                if else_branch.is_some() {
+                    // 有else分支，需要根据条件选择 then_place 或 else_place
+                    // 重新计算条件表达式用于选择
+                    let condition_place = self.build_expr(condition);
+
+                    // 创建临时变量存储 else_place 的值
+                    let temp_else_place = Place::local(
+                        self.new_local(ty.clone(), Mutability::Const, None, *span),
+                        ty.clone(),
+                    );
+                    self.assign(
+                        temp_else_place.clone(),
+                        Rvalue::Use(Operand::Copy(else_place)),
+                        *span,
+                    );
+
+                    // 创建临时变量存储 then_place 的值
+                    let temp_then_place = Place::local(
+                        self.new_local(ty.clone(), Mutability::Const, None, *span),
+                        ty.clone(),
+                    );
+                    self.assign(
+                        temp_then_place.clone(),
+                        Rvalue::Use(Operand::Copy(then_place)),
+                        *span,
+                    );
+
+                    // 创建新块处理 else 情况
+                    let else_assign_block = self.new_basic_block(*span);
+
+                    // 先设置当前块为 merge 块并赋值 then 的结果
+                    self.set_current_block(merge_block);
+                    self.assign(
+                        result_place.clone(),
+                        Rvalue::Use(Operand::Copy(temp_then_place)),
+                        *span,
+                    );
+
+                    // 设置 else_assign_block 的内容
+                    self.set_current_block(else_assign_block);
+                    self.assign(
+                        result_place.clone(),
+                        Rvalue::Use(Operand::Copy(temp_else_place)),
+                        *span,
+                    );
+                    self.terminate(Terminator {
+                        kind: TerminatorKind::Goto {
+                            target: merge_block,
+                        },
+                        span: *span,
+                    });
+
+                    // 回到 merge 块并设置终止器
+                    self.set_current_block(merge_block);
+                    self.terminate(Terminator {
+                        kind: TerminatorKind::SwitchInt {
+                            discr: Operand::Copy(condition_place),
+                            targets: SwitchTargets::if_else(
+                                merge_block,       // 条件为真，保持当前值
+                                else_assign_block, // 条件为假，跳转到 else_assign_block
+                            ),
+                        },
+                        span: *span,
+                    });
+                } else {
+                    self.assign(
+                        result_place.clone(),
+                        Rvalue::Use(Operand::Move(then_place)),
+                        *span,
+                    );
+                }
+
+                result_place
+            }
+            TypedExpr::Loop { body, ty, span } => {
+                // 创建循环的基本块
+                let loop_header = self.new_basic_block(*span);
+                let loop_body = self.new_basic_block(*span);
+                let loop_exit = self.new_basic_block(*span);
+
+                // 跳转到循环头部
+                self.terminate(Terminator {
+                    kind: TerminatorKind::Goto {
+                        target: loop_header,
+                    },
+                    span: *span,
+                });
+
+                // 设置当前块为循环头部并跳转到循环体
+                self.set_current_block(loop_header);
+                self.terminate(Terminator {
+                    kind: TerminatorKind::Goto { target: loop_body },
+                    span: *span,
+                });
+
+                let loop_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Mut, None, *span),
+                    ty.clone(),
+                );
+                // 将循环上下文推入栈中
+                self.loop_context
+                    .push((loop_header, loop_exit, loop_header, loop_place.clone()));
+
+                // 构建循环体
+                self.set_current_block(loop_body);
+                self.build_block(body);
+
+                // 如果循环体没有终止器，则跳转回循环头部
+                if self.current_block_terminator().is_none() {
+                    self.terminate(Terminator {
+                        kind: TerminatorKind::Goto {
+                            target: loop_header,
+                        },
+                        span: *span,
+                    });
+                }
+
+                // 从循环上下文栈中弹出当前循环上下文
+                self.loop_context.pop();
+
+                // 设置当前块为循环出口
+                self.set_current_block(loop_exit);
+
+                // 创建结果变量
+                self.assign(
+                    loop_place.clone(),
+                    Rvalue::Use(Operand::Constant(Constant {
+                        kind: ConstantKind::Unit,
+                        span: *span,
+                    })),
+                    *span,
+                );
+
+                loop_place
+            }
+            TypedExpr::FieldAccess { base, field, .. } => {
+                // 构建基础表达式获取结构体实例
+                let base_place = self.build_expr(base);
+
+                base_place.field_access(field.clone())
+            }
+            TypedExpr::Index {
+                indexed,
+                index,
+                ty,
+                span,
+            } => {
+                // 构建被索引的表达式获取数组/切片的Place
+                let indexed_place = self.build_expr(indexed);
+
+                // 构建索引表达式获取索引值的Place
+                let index_place = self.build_expr(index);
+
+                match index_place {
+                    Place {
+                        local, projection, ..
+                    } if projection.is_empty() => indexed_place.index(local),
+                    _ => {
+                        let temp_local = self.new_local(
+                            Ty::UInt(UIntKind::Usize),
+                            Mutability::Const,
+                            None,
+                            *span,
+                        );
+                        self.assign(
+                            Place::local(temp_local, indexed.ty()),
+                            Rvalue::Use(Operand::Copy(index_place)),
+                            *span,
+                        );
+                        indexed_place.index(temp_local)
+                    }
+                }
+            }
+            TypedExpr::Tuple { elements, ty, span } => {
+                // 构建所有元素的Place
+                let element_places: Vec<Place> =
+                    elements.iter().map(|e| self.build_expr(e)).collect();
+
+                // 创建结果变量
+                let result_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+
+                // 使用Rvalue::Aggregate创建元组
+                self.assign(
+                    result_place.clone(),
+                    Rvalue::Aggregate(
+                        AggregateKind::Tuple,
+                        element_places
+                            .iter()
+                            .map(|p| Operand::Copy(p.clone()))
+                            .collect(),
+                    ),
+                    *span,
+                );
+
+                result_place
+            }
+            TypedExpr::Unit { ty, span } => {
+                // 创建结果变量
+                let result_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+
+                // 赋值为Unit常量
+                self.assign(
+                    result_place.clone(),
+                    Rvalue::Use(Operand::Constant(Constant {
+                        kind: ConstantKind::Unit,
+                        span: *span,
+                    })),
+                    *span,
+                );
+
+                result_place
+            }
+            TypedExpr::To {
+                start,
+                end,
+                ty,
+                span,
+            } => {
+                // 构建起始和结束表达式
+                let start_place = self.build_expr(start);
+                let end_place = self.build_expr(end);
+
+                // 创建结果变量
+                let result_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+
+                // 创建范围值
+                self.assign(
+                    result_place.clone(),
+                    Rvalue::Aggregate(
+                        AggregateKind::Array(ty.clone()),
+                        vec![Operand::Copy(start_place), Operand::Copy(end_place)],
+                    ),
+                    *span,
+                );
+
+                result_place
+            }
+            TypedExpr::ToEq {
+                start,
+                end,
+                ty,
+                span,
+            } => {
+                // 构建起始和结束表达式
+                let start_place = self.build_expr(start);
+                let end_place = self.build_expr(end);
+
+                // 创建结果变量
+                let result_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+
+                // 创建包含式范围值
+                self.assign(
+                    result_place.clone(),
+                    Rvalue::Aggregate(
+                        AggregateKind::Array(ty.clone()),
+                        vec![Operand::Copy(start_place), Operand::Copy(end_place)],
+                    ),
+                    *span,
+                );
+
+                result_place
+            }
+            TypedExpr::Grouped { expr, .. } => self.build_expr(expr),
+            TypedExpr::StructInit {
+                def_id,
+                fields,
+                ty,
+                span,
+            } => {
+                // 构建所有字段的Place
+                let field_operands: Vec<Operand> = fields
+                    .iter()
+                    .map(|(_, expr)| {
+                        let expr_place = self.build_expr(expr);
+                        Operand::Copy(expr_place)
+                    })
+                    .collect();
+
+                // 创建结果变量
+                let result_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+
+                self.assign(
+                    result_place.clone(),
+                    Rvalue::Aggregate(AggregateKind::Adt(*def_id, vec![]), field_operands),
+                    *span,
+                );
+
+                result_place
+            }
+            TypedExpr::Cast {
+                expr,
+                kind,
+                ty,
+                span,
+            } => {
+                let source_place = self.build_expr(expr);
+
+                let result_place = Place::local(
+                    self.new_local(ty.clone(), Mutability::Const, None, *span),
+                    ty.clone(),
+                );
+
+                let rvalue = Rvalue::Cast(*kind, source_place);
+
+                self.assign(result_place.clone(), rvalue, *span);
+
+                result_place
+            }
+        }
+    }
+
+    fn build_place(&mut self, expr: &TypedExpr) -> Place {
+        match expr {
+            TypedExpr::Local { def_id, ty, .. } => {
+                let local = self.local_map.get(def_id).unwrap();
+                Place::local(*local, ty.clone())
+            }
+            TypedExpr::Dereference { expr, ty, .. } => {
+                let inner = self.build_place(expr);
+                Place {
+                    local: inner.local,
+                    projection: [inner.projection, vec![PlaceElem::Deref]].concat(),
+                    ty: ty.clone(),
+                }
+            }
+            TypedExpr::FieldAccess { base, field, .. } => {
+                let base_place = self.build_place(base);
+                Place {
+                    local: base_place.local,
+                    projection: [base_place.projection, vec![PlaceElem::Field(field.clone())]]
+                        .concat(),
+                    ty: field.ty.clone(),
+                }
+            }
+            // 其他表达式不能作为左值
+            _ => panic!("Cannot use as place: {:?}", expr),
+        }
+    }
+
+    fn new_local(
+        &mut self,
+        ty: Ty,
+        mutablility: Mutability,
+        name: Option<StringId>,
+        span: Span,
+    ) -> Local {
+        let local = Local(self.next_local);
+        self.next_local += 1;
+        self.current_function
+            .as_mut()
+            .unwrap()
+            .local_decls
+            .push(LocalDecl {
+                ty,
+                mutability: mutablility,
+                name,
                 span,
             });
-        }
-
-        litec_mir::LocalId(local_id)
+        local
     }
 
-    fn new_temp(&mut self, ty: Ty, span: Span) -> LocalId {
-        self.declare_local(StringId::from("temp"), ty, span)
+    fn new_global(
+        &mut self,
+        def_id: DefId,
+        name: StringId,
+        ty: Ty,
+        init: Option<Constant>,
+        span: Span,
+    ) {
+        self.globals.insert(
+            def_id,
+            GlobalDecl {
+                def_id,
+                name,
+                ty,
+                init,
+                span,
+            },
+        );
     }
 
-    fn new_block(&mut self) -> BasicBlockId {
-        let id = self.next_block_id;
-        self.next_block_id += 1;
-        litec_mir::BasicBlockId(id)
+    fn new_basic_block(&mut self, span: Span) -> BasicBlockId {
+        self.current_function
+            .as_mut()
+            .unwrap()
+            .new_basic_block(span)
     }
 
-    fn assign(&mut self, dest: LocalId, rvalue: Rvalue, span: Span) {
-        self.current_statements.push(Statement::Assign {
-            dest,
-            rvalue,
-            span,
-        });
+    fn set_current_block(&mut self, block_id: BasicBlockId) {
+        self.current_block_id = block_id;
     }
 
-    fn goto(&mut self, target: BasicBlockId, span: Span) {
-        self.set_terminator(Terminator::Goto { target, span });
-    }
-
-    fn return_(&mut self, value: Operand, span: Span) {
-        self.set_terminator(Terminator::Return { value, span });
-    }
-
-    fn switch(&mut self, discr: Operand, targets: SwitchTargets, span: Span) {
-        self.set_terminator(Terminator::Switch { discr, targets, span });
-    }
-
-    fn set_terminator(&mut self, terminator: Terminator) {
-        // 先完成当前块（处理语句）
-        self.finish_block();
-        
-        // 设置终结符
-        if let Some(block) = self.basic_blocks.iter_mut()
-            .find(|b| b.id == self.current_block) {
-            block.terminator = Some(terminator);
+    fn current_block_terminator(&self) -> Option<&Terminator> {
+        if let Some(func) = &self.current_function {
+            Some(&func.basic_block(self.current_block_id).terminator)
         } else {
-            // 创建新块并设置终结符
-            let block = BasicBlock {
-                id: self.current_block,
-                statements: Vec::new(),
-                terminator: Some(terminator),
-            };
-            self.basic_blocks.push(block);
+            None
         }
     }
 
-    fn finish_function(&mut self) -> MirFunction {
-        // 完成最后一个块
-        self.finish_block();
+    fn assign(&mut self, place: Place, rvalue: Rvalue, span: Span) {
+        if let Some(func) = &mut self.current_function {
+            func.basic_block_mut(self.current_block_id)
+                .statements
+                .push(Statement {
+                    span,
+                    kind: StatementKind::Assign { place, rvalue },
+                });
+        }
+    }
 
-        let mut function = self.current_function.take().expect("No current function");
-        function.basic_blocks = std::mem::take(&mut self.basic_blocks);
-        
-        function
+    fn terminate(&mut self, terminator: Terminator) {
+        if let Some(func) = &mut self.current_function {
+            func.basic_block_mut(self.current_block_id).terminator = terminator;
+        }
+    }
+
+    fn assign_op_to_bin_op(&self, op: AssignOp) -> BinOp {
+        match op {
+            AssignOp::Add => BinOp::Add,
+            AssignOp::Sub => BinOp::Sub,
+            AssignOp::Mul => BinOp::Mul,
+            AssignOp::Div => BinOp::Div,
+            AssignOp::Rem => BinOp::Rem,
+            AssignOp::BitAnd => BinOp::BitAnd,
+            AssignOp::BitOr => BinOp::BitOr,
+            AssignOp::BitXor => BinOp::BitXor,
+            AssignOp::Shl => BinOp::Shl,
+            AssignOp::Shr => BinOp::Shr,
+            _ => BinOp::Add,
+        }
+    }
+
+    fn move_or_copy_operand(&self, ty: &Ty, place: Place) -> Operand {
+        if ty.is_copyable() {
+            Operand::Copy(place)
+        } else {
+            Operand::Move(place)
+        }
+    }
+
+    fn get_def_id_name(&self, def_id: DefId) -> String {
+        self.typed_crate.definitions[def_id.index as usize]
+            .name
+            .to_string()
     }
 }
 
-// 公共接口
-pub fn build_mir(hir: &TypedCrate) -> Vec<MirFunction> {
-    let builder = Builder::new(hir);
-    builder.build_crate()
+pub fn build(typed_crate: TypedCrate) -> MirCrate {
+    Builder::new(typed_crate).build()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use litec_span::{Span, StringId};
-    use litec_typed_hir::{TypedBlock, TypedCrate, TypedExpr, TypedItem, TypedParam, TypedStmt, Visibility};
-    use litec_hir::LiteralValue;
+    use litec_lower::lower;
+    use litec_name_resolver::Resolver;
+    use litec_parse::parser::parse;
+    use litec_span::SourceMap;
+    use litec_type_checker::{TypeChecker, check};
+    use std::path::PathBuf;
 
-    // 创建一个虚拟的 Span 用于测试
-    fn dummy_span() -> Span {
-        Span::default() // 或者 Span { start: 0, end: 0 }
+    // 辅助函数：从源代码生成 MIR
+    fn mir_from_source(source: &str) -> MirCrate {
+        let mut source_map = SourceMap::new();
+        let file_id = source_map.add_file(
+            "test.lt".to_string(),
+            source.to_string(),
+            &PathBuf::from("test.lt"),
+        );
+
+        // 解析
+        let (ast, diagnostics) = parse(&mut source_map, file_id);
+        for diagnostic in &diagnostics {
+            println!("{}", diagnostic.render(&source_map))
+        }
+        assert!(diagnostics.is_empty());
+
+        let (hir, diagnostics) = lower(ast);
+        for diagnostic in &diagnostics {
+            println!("{}", diagnostic.render(&source_map))
+        }
+        assert!(diagnostics.is_empty());
+
+        // 名称解析
+        let resolver = Resolver::new(&mut source_map, file_id);
+        let resolve_output = resolver.resolve(&hir);
+
+        // 类型检查
+        let type_checker = TypeChecker::new(resolve_output);
+        let (typed_crate, diagnostics) = type_checker.check_crate();
+        for diagnostic in &diagnostics {
+            println!("{}", diagnostic.render(&source_map))
+        }
+        assert!(diagnostics.is_empty());
+
+        // MIR 生成
+        let builder = Builder::new(typed_crate);
+        builder.build()
     }
 
-    // 创建一个虚拟的 StringId 用于测试
-    fn dummy_string_id() -> StringId {
-        StringId(0)
-    }
+    #[test]
+    fn test_simple_function() {
+        let source = r#"
+        fn add(a: i32, b: i32) -> i32 {
+            a + b
+        }
+        "#;
 
-    // 创建一个虚拟的 DefId 用于测试
-    fn dummy_def_id() -> DefId {
-        DefId { 
-            index: 0, 
-            kind: litec_typed_hir::DefKind::Function 
+        let mir_crate = mir_from_source(source);
+
+        // 验证 MIR 中有一个函数
+        assert_eq!(mir_crate.items.len(), 1);
+
+        // 验证函数是 add
+        if let MirItem::Function(func) = &mir_crate.items[0] {
+            assert_eq!(func.args.len(), 2); // 两个参数
+            assert_eq!(func.local_decls.len(), 3); // 两个参数 + 一个返回值
+            assert_eq!(func.basic_blocks.len(), 1); // 一个基本块
+        } else {
+            panic!("Expected a function item");
         }
     }
 
     #[test]
-    fn test_build_simple_function() {
-        // 构建一个简单的 HIR 函数：fn add() -> i32 { 1 + 2 }
-        let hir = TypedCrate {
-            items: vec![
-                TypedItem::Function {
-                    def_id: dummy_def_id(),
-                    visibility: Visibility::Public,
-                    name: dummy_string_id(),
-                    params: Vec::new(),
-                    return_ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                    body: TypedBlock {
-                        stmts: Vec::new(),
-                        tail: Some(Box::new(TypedExpr::Addition {
-                            left: Box::new(TypedExpr::Literal {
-                                value: LiteralValue::Int { value: 1, kind: litec_hir::LitIntValue::I32 },
-                                ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                                span: dummy_span(),
-                            }),
-                            right: Box::new(TypedExpr::Literal {
-                                value: LiteralValue::Int { value: 2, kind: litec_hir::LitIntValue::I32 },
-                                ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                                span: dummy_span(),
-                            }),
-                            ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                            span: dummy_span(),
-                        })),
-                        ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                        span: dummy_span(),
-                    },
-                    span: dummy_span(),
-                }
-            ],
-        };
-
-        // 构建 MIR
-        let functions = build_mir(&hir);
-        
-        // 严格的验证
-        assert_eq!(functions.len(), 1, "Should generate exactly one function");
-        
-        let mir_func = &functions[0];
-        assert_eq!(mir_func.def_id, dummy_def_id(), "Function DefId should match");
-        assert_eq!(mir_func.name, dummy_string_id(), "Function name should match");
-        
-        // 验证基本块
-        assert!(!mir_func.basic_blocks.is_empty(), "Function should have at least one basic block");
-        
-        let entry_block = &mir_func.basic_blocks[0];
-        println!("Entry block statements: {:?}", entry_block.statements);
-        println!("Entry block terminator: {:?}", entry_block.terminator);
-        
-        // 严格的语句检查
-        assert_eq!(entry_block.statements.len(), 2, "Entry block should have exactly 2 statements");
-        
-        // 检查第一个语句：计算 1 + 2
-        if let Statement::Assign { dest: LocalId(1), rvalue: Rvalue::Binary(BinOp::Add, Operand::Literal(Literal::I32(1)), Operand::Literal(Literal::I32(2))), .. } = &entry_block.statements[0] {
-            // 正确：第一个语句计算 1 + 2
-        } else {
-            panic!("First statement should compute 1 + 2 and store to LocalId(1)");
-        }
-        
-        // 检查第二个语句：存储结果到返回位置
-        if let Statement::Assign { dest: LocalId(0), rvalue: Rvalue::Use(Operand::Local(LocalId(1))), .. } = &entry_block.statements[1] {
-            // 正确：第二个语句存储到返回位置
-        } else {
-            panic!("Second statement should store result to return position LocalId(0)");
-        }
-        
-        // 严格的终结符检查
-        assert!(entry_block.terminator.is_some(), "Entry block must have a terminator");
-        
-        if let Some(Terminator::Return { value: Operand::Local(LocalId(0)), .. }) = &entry_block.terminator {
-            // 正确：返回 LocalId(0) 的值
-        } else {
-            panic!("Entry block terminator should be Return with value from LocalId(0)");
-        }
-        
-        // 验证返回类型
-        assert_eq!(mir_func.locals[0].ty, Ty::Int(IntKind::I32), "Return type should be i32");
-    }
-
-    #[test]
-    fn test_build_function_with_variables() {
-        // 构建一个更复杂的函数：fn test() -> i32 { let x = 5; let y = 10; x + y }
-        let x_def_id = DefId { 
-            index: 1, 
-            kind: litec_typed_hir::DefKind::Variable 
-        };
-        let y_def_id = DefId { 
-            index: 2, 
-            kind: litec_typed_hir::DefKind::Variable 
-        };
-        
-        let hir = TypedCrate {
-            items: vec![
-                TypedItem::Function {
-                    def_id: dummy_def_id(),
-                    visibility: Visibility::Public,
-                    name: dummy_string_id(),
-                    params: Vec::new(),
-                    return_ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                    body: TypedBlock {
-                        stmts: vec![
-                            TypedStmt::Let {
-                                name: dummy_string_id(),
-                                def_id: x_def_id,
-                                ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                                init: Some(Box::new(TypedExpr::Literal {
-                                    value: LiteralValue::Int { value: 5, kind: litec_hir::LitIntValue::I32 },
-                                    ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                                    span: dummy_span(),
-                                })),
-                                span: dummy_span(),
-                            },
-                            TypedStmt::Let {
-                                name: dummy_string_id(),
-                                def_id: y_def_id,
-                                ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                                init: Some(Box::new(TypedExpr::Literal {
-                                    value: LiteralValue::Int { value: 10, kind: litec_hir::LitIntValue::I32 },
-                                    ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                                    span: dummy_span(),
-                                })),
-                                span: dummy_span(),
-                            },
-                        ],
-                        tail: Some(Box::new(TypedExpr::Addition {
-                            left: Box::new(TypedExpr::Ident {
-                                name: dummy_string_id(),
-                                def_id: x_def_id,
-                                ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                                span: dummy_span(),
-                            }),
-                            right: Box::new(TypedExpr::Ident {
-                                name: dummy_string_id(),
-                                def_id: y_def_id,
-                                ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                                span: dummy_span(),
-                            }),
-                            ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                            span: dummy_span(),
-                        })),
-                        ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                        span: dummy_span(),
-                    },
-                    span: dummy_span(),
-                }
-            ],
-        };
-
-        let functions = build_mir(&hir);
-        assert_eq!(functions.len(), 1, "Should generate exactly one function");
-        
-        let mir_func = &functions[0];
-        
-        // 严格的局部变量检查
-        assert!(mir_func.locals.len() >= 3, "Should have at least return position + x + y locals");
-        
-        // 检查基本块结构
-        assert!(!mir_func.basic_blocks.is_empty(), "Should have at least one basic block");
-        
-        let entry_block = &mir_func.basic_blocks[0];
-        assert!(entry_block.terminator.is_some(), "Entry block must have a terminator");
-        
-        // 验证有变量赋值和计算语句
-        assert!(!entry_block.statements.is_empty(), "Should have statements for variable assignments and computation");
-    }
-
-    #[test]
-    fn test_build_function_with_parameters() {
-        // 构建带参数的函数：fn add(a: i32, b: i32) -> i32 { a + b }
-        let a_def_id = DefId { 
-            index: 1, 
-            kind: litec_typed_hir::DefKind::Variable 
-        };
-        let b_def_id = DefId { 
-            index: 2, 
-            kind: litec_typed_hir::DefKind::Variable 
-        };
-        
-        let hir = TypedCrate {
-            items: vec![
-                TypedItem::Function {
-                    def_id: dummy_def_id(),
-                    visibility: Visibility::Public,
-                    name: dummy_string_id(),
-                    params: vec![
-                        TypedParam {
-                            name: dummy_string_id(),
-                            def_id: a_def_id,
-                            ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                            span: dummy_span(),
-                        },
-                        TypedParam {
-                            name: dummy_string_id(),
-                            def_id: b_def_id,
-                            ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                            span: dummy_span(),
-                        },
-                    ],
-                    return_ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                    body: TypedBlock {
-                        stmts: Vec::new(),
-                        tail: Some(Box::new(TypedExpr::Addition {
-                            left: Box::new(TypedExpr::Ident {
-                                name: dummy_string_id(),
-                                def_id: a_def_id,
-                                ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                                span: dummy_span(),
-                            }),
-                            right: Box::new(TypedExpr::Ident {
-                                name: dummy_string_id(),
-                                def_id: b_def_id,
-                                ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                                span: dummy_span(),
-                            }),
-                            ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                            span: dummy_span(),
-                        })),
-                        ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                        span: dummy_span(),
-                    },
-                    span: dummy_span(),
-                }
-            ],
-        };
-
-        let functions = build_mir(&hir);
-        assert_eq!(functions.len(), 1, "Should generate exactly one function");
-        
-        let mir_func = &functions[0];
-        
-        // 严格的参数检查
-        assert!(mir_func.locals.len() >= 3, "Should have at least return position + a + b locals");
-        
-        // 检查基本块结构
-        assert!(!mir_func.basic_blocks.is_empty(), "Should have at least one basic block");
-        
-        let entry_block = &mir_func.basic_blocks[0];
-        assert!(entry_block.terminator.is_some(), "Entry block must have a terminator");
-        
-        // 验证有参数使用和计算语句
-        assert!(!entry_block.statements.is_empty(), "Should have statements for parameter usage and computation");
-    }
-
-    // 辅助函数：打印 MIR 的调试信息
-    fn debug_print_mir(functions: &[MirFunction]) {
-        for (i, func) in functions.iter().enumerate() {
-            println!("Function {}: {:?}", i, func.name);
-            println!("  DefId: {:?}", func.def_id);
-            println!("  Locals: {}", func.locals.len());
-            for (j, local) in func.locals.iter().enumerate() {
-                println!("    Local {}: {:?} ({:?})", j, local.ty, local.name);
+    fn test_if_expression() {
+        let source = r#"
+        fn max(a: i32, b: i32) -> i32 {
+            if a > b { 
+                a
+            } else { 
+                b
             }
-            println!("  Basic blocks: {}", func.basic_blocks.len());
-            for block in &func.basic_blocks {
-                println!("    Block {:?}:", block.id);
-                println!("      Statements: {}", block.statements.len());
-                for stmt in &block.statements {
-                    println!("        {:?}", stmt);
-                }
-                println!("      Terminator: {:?}", block.terminator);
-            }
-            println!();
+        }
+        "#;
+
+        let mir_crate = mir_from_source(source);
+
+        if let MirItem::Function(func) = &mir_crate.items[0] {
+            // if 表达式应该生成多个基本块
+            assert!(func.basic_blocks.len() > 1);
+
+            // 验证有条件跳转
+            let has_conditional = func.basic_blocks.iter().any(|bb| {
+                matches!(
+                    &bb.terminator,
+                    Terminator {
+                        kind: TerminatorKind::SwitchInt { .. },
+                        span: _
+                    }
+                )
+            });
+            assert!(has_conditional, "Expected a conditional terminator");
+        } else {
+            panic!("Expected a function item");
         }
     }
 
     #[test]
-    fn test_debug_output() {
-        // 构建一个简单函数用于调试输出
-        let hir = TypedCrate {
-            items: vec![
-                TypedItem::Function {
-                    def_id: dummy_def_id(),
-                    visibility: Visibility::Public,
-                    name: dummy_string_id(),
-                    params: Vec::new(),
-                    return_ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                    body: TypedBlock {
-                        stmts: Vec::new(),
-                        tail: Some(Box::new(TypedExpr::Literal {
-                            value: LiteralValue::Int { value: 42, kind: litec_hir::LitIntValue::I32 },
-                            ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                            span: dummy_span(),
-                        })),
-                        ty: litec_typed_hir::ty::Ty::Int(litec_typed_hir::ty::IntKind::I32),
-                        span: dummy_span(),
-                    },
-                    span: dummy_span(),
-                }
-            ],
-        };
+    fn test_loop() {
+        let source = r#"
+        fn sum(n: i32) -> i32 {
+            let mut result = 0;
+            let mut i = 0;
+            loop {
+                if i >= n { break result; }
+                result = result + i;
+                i = i + 1;
+            }
+        }
+        "#;
 
-        let functions = build_mir(&hir);
-        debug_print_mir(&functions);
-        
-        // 严格的验证
-        assert_eq!(functions.len(), 1);
-        let mir_func = &functions[0];
-        assert!(!mir_func.basic_blocks.is_empty());
-        
-        let entry_block = &mir_func.basic_blocks[0];
-        assert!(entry_block.terminator.is_some(), "Debug function must have terminator");
+        let mir_crate = mir_from_source(source);
+
+        if let MirItem::Function(func) = &mir_crate.items[0] {
+            // 循环应该生成多个基本块
+            assert!(func.basic_blocks.len() > 1);
+
+            // 验证有循环结构
+            let has_loop = func.basic_blocks.iter().any(|bb| {
+                matches!(
+                    &bb.terminator,
+                    Terminator {
+                        kind: TerminatorKind::Goto { .. },
+                        span: _
+                    }
+                )
+            });
+            assert!(has_loop, "Expected a loop structure");
+        } else {
+            panic!("Expected a function item");
+        }
+    }
+
+    #[test]
+    fn test_struct() {
+        let source = r#"
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+
+        fn new_point(x: i32, y: i32) -> Point {
+            Point { x: x, y: y }
+        }
+        "#;
+
+        let mir_crate = mir_from_source(source);
+
+        // 验证 MIR 中有一个结构体和一个函数
+        assert_eq!(mir_crate.items.len(), 2);
+
+        // 验证结构体
+        if let MirItem::Struct(struct_def) = &mir_crate.items[0] {
+            assert_eq!(struct_def.fields.len(), 2);
+        } else {
+            panic!("Expected a struct item");
+        }
+    }
+
+    #[test]
+    fn test_extern_function() {
+        let source = r#"
+        extern "C" {
+            fn printf(fmt: str, ...) -> i32;
+        }
+
+        fn main() {
+            printf("Hello, world!\n");
+        }
+        "#;
+
+        let mir_crate = mir_from_source(source);
+
+        // 验证 MIR 中有一个外部块和一个函数
+        assert_eq!(mir_crate.items.len(), 2);
+
+        // 验证外部块
+        if let MirItem::Extern(extern_block) = &mir_crate.items[0] {
+            assert_eq!(extern_block.items.len(), 1);
+        } else {
+            panic!("Expected an extern block");
+        }
+    }
+
+    #[test]
+    fn test_main_function() {
+        let source = r#"
+        fn main() -> i32 {
+            42
+        }
+        "#;
+
+        let mir_crate = mir_from_source(source);
+
+        // 验证 MIR 中有一个函数
+        assert_eq!(mir_crate.items.len(), 1);
+
+        // 验证函数是 main
+        if let MirItem::Function(func) = &mir_crate.items[0] {
+            assert_eq!(
+                func.return_ty,
+                Ty::Int(IntKind::I32)
+            );
+        } else {
+            panic!("Expected a function item");
+        }
+    }
+
+    #[test]
+    fn test_program() {
+        let source = r#"
+        extern "C" {
+            fn printf(fmt: str, ...) -> i32;
+        }
+            
+        fn main() {
+            let a = -1;
+            let b = a as u32;
+            printf("%d\n", b);
+        }
+        "#;
+
+        let _mir_crate = mir_from_source(source);
     }
 }

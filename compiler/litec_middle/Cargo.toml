@@ -1,0 +1,14 @@
+[package]
+name = "litec_middle"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+litec_span = { path = "../litec_span" }
+litec_ast = { path = "../litec_ast" }
+litec_hir = { path = "../litec_hir" }
+rustc-hash = "2.1.1"
+index_vec = "0.1.4"
+bumpalo = "3.20.2"
+
+[lib]

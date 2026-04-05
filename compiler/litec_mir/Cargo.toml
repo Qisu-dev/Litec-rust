@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 litec_span = { path = "../litec_span" }
 litec_typed_hir = { path = "../litec_typed_hir" }
+litec_hir = { path = "../litec_hir" }
 
 rustc-hash = "2.1.1"
 

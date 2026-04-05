@@ -4,20 +4,26 @@ version = "0.1.1-alpha"
 edition = "2024"
 readme = "README.md"
 license = "MIT"
+links = "LLVM"
+build = "build.rs"
 
 [dependencies]
 litec_parse = { path = "compiler/litec_parse" }
 litec_ast = { path = "compiler/litec_ast" }
 litec_span = { path = "compiler/litec_span" }
 litec_error = { path = "compiler/litec_error" }
-litec_lower = { path = "compiler/litec_lower" }
+litec_ast_lower = { path = "compiler/litec_ast_lower" }
 litec_hir = { path = "compiler/litec_hir" }
+litec_name_resolver = { path = "compiler/litec_name_resolver" }
 litec_type_checker = { path = "compiler/litec_type_checker" }
 litec_mir_lower = { path = "compiler/litec_mir_lower" }
+litec_mir = { path = "compiler/litec_mir" }
 litec_codegen = { path = "compiler/litec_codegen" }
 
-clap = { version = "4.5.53", features = ["derive"] }
-anyhow = "1.0.100"
+clap = { version = "4.6.0", features = ["derive"] }
+anyhow = "1.0.101"
+glob = "0.3.3"
+inkwell = { workspace = true }
 
 [workspace]
 members = [
@@ -25,7 +31,7 @@ members = [
     "compiler/litec_parse",
     "compiler/litec_span",
     "compiler/litec_error",
-    "compiler/litec_lower",
+    "compiler/litec_ast_lower",
     "compiler/litec_hir",
     "compiler/litec_type_checker",
     "compiler/litec_typed_hir",
@@ -33,4 +39,16 @@ members = [
     "compiler/litec_mir",
     "compiler/litec_mir_lower",
     "compiler/litec_codegen",
+    "compiler/litec_ty",
+    "compiler/litec_middle",
+    "compiler/litec_resolve",
+    "compiler/litec_session",
 ]
+
+[workspace.dependencies]
+inkwell = { version = "0.8.0", features = ["llvm18-1"] }
+
+# Cargo.toml
+[profile.dev]
+debug = true  # 保留调试信息
+strip = false # 不剥离符号

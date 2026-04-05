@@ -1,16 +1,13 @@
-use std::process::{Command, Stdio};
-use std::io::{self, Write};
-use anyhow::{Result, Context, anyhow};
-use std::path::{Path, PathBuf};
+use anyhow::{Context, Result, anyhow};
+use std::path::Path;
+use std::process::Command;
+use which::which;
 
-/// 跨平台链接管理器
-#[derive(Debug)]
 pub struct Linker {
     platform: Platform,
-    available_linkers: Vec<LinkerType>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Platform {
     Windows,
     Linux,
@@ -18,199 +15,278 @@ pub enum Platform {
     Unknown,
 }
 
-#[derive(Debug, Clone)]
-pub enum LinkerType {
-    MsvcLink,
-    LldLink,
-    MingwGcc,
-    MingwClang,
-    Gcc,
-    Clang,
-    Ld,
-}
-
 impl Linker {
     pub fn new() -> Result<Self> {
         let platform = detect_platform();
-        let available_linkers = detect_available_linkers(platform);
-        
-        if available_linkers.is_empty() {
-            return Err(anyhow!("未找到可用的链接器。请安装开发工具链。"));
-        }
-        
-        dbg!("🎯 检测到平台: {:?}", platform);
-        dbg!("🔧 可用链接器: {:?}", &available_linkers);
-        
-        Ok(Self {
-            platform,
-            available_linkers,
-        })
+        println!("🎯 检测到平台: {:?}", platform);
+        Ok(Self { platform })
     }
-    
-    /// 自动链接目标文件生成可执行文件
+
     pub fn link_executable(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
-        dbg!("🔗 开始链接: {:?} -> {:?}", object_file, output_exe);
-        
-        // 验证目标文件存在
+        println!("🔗 链接: {:?} -> {:?}", object_file, output_exe);
+
         if !object_file.exists() {
-            return Err(anyhow!("目标文件不存在: {:?}", object_file));
+            return Err(anyhow!("目标文件不存在"));
         }
-        
-        // 尝试所有可用的链接器
-        for linker_type in &self.available_linkers {
-            match self.try_link_with(linker_type, object_file, output_exe) {
-                Ok(()) => {
-                    dbg!("✅ 使用 {:?} 链接成功", linker_type);
-                    return Ok(());
-                }
-                Err(e) => {
-                    dbg!("⚠️  {:?} 链接失败: {}", linker_type, e);
-                    continue;
-                }
-            }
+
+        // 检查目标文件类型
+        self.check_object_file(object_file)?;
+
+        // 方案1: 使用 LLVM/Clang 链接（推荐，因为目标文件是 LLVM 生成的）
+        if let Ok(()) = self.link_with_clang(object_file, output_exe) {
+            return Ok(());
         }
-        
+
+        // 方案2: 使用 MSVC link（如果安装了 Visual Studio）
+        if let Ok(()) = self.link_with_msvc(object_file, output_exe) {
+            return Ok(());
+        }
+
+        // 方案3: 使用 LLD（LLVM 链接器）
+        if let Ok(()) = self.link_with_lld(object_file, output_exe) {
+            return Ok(());
+        }
+
+        // 方案4: 尝试 MinGW GCC（可能需要额外的兼容处理）
+        if let Ok(()) = self.link_with_mingw(object_file, output_exe) {
+            return Ok(());
+        }
+
         Err(anyhow!("所有链接器都失败了"))
     }
-    
-    fn try_link_with(&self, linker_type: &LinkerType, object_file: &Path, output_exe: &Path) -> Result<()> {
-        match linker_type {
-            LinkerType::MsvcLink => self.link_msvc(object_file, output_exe),
-            LinkerType::LldLink => self.link_lld(object_file, output_exe),
-            LinkerType::MingwGcc => self.link_mingw_gcc(object_file, output_exe),
-            LinkerType::MingwClang => self.link_mingw_clang(object_file, output_exe),
-            LinkerType::Gcc => self.link_gcc(object_file, output_exe),
-            LinkerType::Clang => self.link_clang(object_file, output_exe),
-            LinkerType::Ld => self.link_ld(object_file, output_exe),
+
+    fn check_object_file(&self, object_file: &Path) -> Result<()> {
+        println!("📄 检查目标文件...");
+        
+        // 使用 llvm-objdump 或 objdump 查看文件头
+        let dumpers = ["llvm-objdump", "objdump"];
+        for dumper in &dumpers {
+            if let Ok(output) = Command::new(dumper).arg("-f").arg(object_file).output() {
+                let info = String::from_utf8_lossy(&output.stdout);
+                println!("   文件信息: {}", info.lines().next().unwrap_or("未知").trim());
+                break;
+            }
         }
+
+        Ok(())
     }
-    
-    // Windows 链接器实现
-    fn link_msvc(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
+
+    /// 使用 Clang 链接（最佳选择，因为目标文件是 LLVM 生成的）
+    fn link_with_clang(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
+        // 尝试不同变体的 clang
+        let clang_variants = [
+            "clang",
+            "clang++", 
+            "x86_64-w64-mingw32-clang",
+            "i686-w64-mingw32-clang",
+        ];
+
+        for clang in &clang_variants {
+            if which(clang).is_err() {
+                continue;
+            }
+
+            let mut cmd = Command::new(clang);
+            cmd.arg("-o").arg(output_exe).arg(object_file);
+
+            // Windows 特定选项
+            if self.platform == Platform::Windows {
+                cmd.arg("-target").arg("x86_64-pc-windows-gnu"); // 或 msvc
+                cmd.arg("-fuse-ld=lld"); // 使用 LLD 链接器，更快更兼容
+            }
+
+            // 链接 C 库
+            cmd.arg("-lc");
+
+            println!("  尝试: {} {:?}", clang, cmd.get_args().collect::<Vec<_>>());
+
+            match cmd.output() {
+                Ok(output) if output.status.success() => {
+                    println!("✅ 使用 {} 链接成功", clang);
+                    return Ok(());
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!("⚠️  {} 失败: {}", clang, stderr.lines().next().unwrap_or("未知错误"));
+                }
+                Err(e) => {
+                    println!("⚠️  无法执行 {}: {}", clang, e);
+                }
+            }
+        }
+
+        Err(anyhow!("Clang 链接失败"))
+    }
+
+    /// 使用 MSVC link（需要安装 Visual Studio）
+    fn link_with_msvc(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
+        if which("link").is_err() {
+            return Err(anyhow!("MSVC link 不存在"));
+        }
+
         let mut cmd = Command::new("link");
         cmd.arg("/NOLOGO")
-           .arg("/ENTRY:main")
-           .arg("/SUBSYSTEM:CONSOLE")
-           .arg("/OUT:")
-           .arg(output_exe)
-           .arg(object_file);
-        
-        self.run_command(cmd, "MSVC link")
-    }
-    
-    fn link_lld(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
-        let mut cmd = Command::new("lld-link");
-        cmd.arg("/ENTRY:main")
-           .arg("/SUBSYSTEM:CONSOLE")
-           .arg("/OUT:")
-           .arg(output_exe)
-           .arg(object_file);
-        
-        self.run_command(cmd, "LLD link")
-    }
-    
-    fn link_mingw_gcc(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
-        let mut cmd = Command::new("x86_64-w64-mingw32-gcc");
-        cmd.arg("-o")
-           .arg(output_exe)
-           .arg(object_file)
-           .arg("-static");  // 静态链接避免依赖
-        
-        self.run_command(cmd, "MinGW GCC")
-    }
-    
-    fn link_mingw_clang(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
-        let mut cmd = Command::new("x86_64-w64-mingw32-clang");
-        cmd.arg("-o")
-           .arg(output_exe)
-           .arg(object_file)
-           .arg("-static");
-        
-        self.run_command(cmd, "MinGW Clang")
-    }
-    
-    // Unix-like 系统链接器实现
-    fn link_gcc(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
-        let mut cmd = Command::new("gcc");
-        cmd.arg("-o")
-           .arg(output_exe)
-           .arg(object_file)
-           .arg("-static")
-           .arg("-nostartfiles");
-        
-        self.run_command(cmd, "GCC")
-    }
-    
-    fn link_clang(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
-        let mut cmd = Command::new("clang");
-        cmd.arg("-o")
-           .arg(output_exe)
-           .arg(object_file)
-           .arg("-static")
-           .arg("-nostartfiles");
-        
-        self.run_command(cmd, "Clang")
-    }
-    
-    fn link_ld(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
-        let entry_point = match self.platform {
-            Platform::MacOS => "_main",
-            _ => "main",
-        };
-        
-        let mut cmd = Command::new("ld");
-        cmd.arg("-o")
-           .arg(output_exe)
-           .arg(object_file)
-           .arg("-e")
-           .arg(entry_point);
-        
-        // 平台特定的库
-        match self.platform {
-            Platform::Linux => {
-                cmd.arg("-lc")
-                   .arg("-dynamic-linker")
-                   .arg("/lib64/ld-linux-x86-64.so.2");
+            .arg("/ENTRY:main")
+            .arg("/SUBSYSTEM:CONSOLE")
+            .arg(format!("/OUT:{}", output_exe.display()));
+
+        // 添加库路径（从环境变量或默认位置）
+        if let Ok(lib_paths) = std::env::var("LIB") {
+            for path in lib_paths.split(';') {
+                if !path.is_empty() {
+                    cmd.arg(format!("/LIBPATH:{}", path));
+                }
             }
-            Platform::MacOS => {
-                cmd.arg("-lSystem")
-                   .arg("-syslibroot")
-                   .arg("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk");
-            }
-            _ => {}
         }
-        
-        self.run_command(cmd, "LD")
-    }
-    
-    fn run_command(&self, mut cmd: Command, name: &str) -> Result<()> {
-        dbg!("  尝试: {} {:?}", name, cmd.get_args().collect::<Vec<_>>());
-        
-        let output = cmd
-            .stderr(Stdio::piped())
-            .stdout(Stdio::piped())
-            .output()
-            .with_context(|| format!("无法执行链接器: {}", name))?;
-        
+
+        // 链接必要的库
+        cmd.arg("libcmt.lib")      // C 运行时（静态）
+            .arg("kernel32.lib")    // Windows API
+            .arg("legacy_stdio_definitions.lib") // 兼容旧版 printf
+            .arg(object_file);
+
+        println!("  尝试: MSVC link {:?}", cmd.get_args().collect::<Vec<_>>());
+
+        let output = cmd.output()
+            .with_context(|| "无法执行 MSVC link")?;
+
         if output.status.success() {
+            println!("✅ 使用 MSVC link 链接成功");
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            
-            if !stdout.is_empty() {
-                dbg!("    输出: {}", stdout);
-            }
-            if !stderr.is_empty() {
-                dbg!("    错误: {}", stderr);
-            }
-            
-            Err(anyhow!("链接器 {} 返回非零状态", name))
+            println!("⚠️  MSVC link 失败: {}", stderr);
+            Err(anyhow!("MSVC link 失败"))
         }
+    }
+
+    /// 使用 LLD（LLVM 链接器）
+    fn link_with_lld(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
+        // LLD 可以作为 GNU ld 或 MSVC link 的替代品
+        let lld_variants = [
+            ("lld", "gnu"),           // GNU 风格
+            ("lld-link", "msvc"),     // MSVC 风格
+            ("ld.lld", "gnu"),        // GNU 风格（Linux 常用）
+            ("ld64.lld", "darwin"),   // macOS 风格
+        ];
+
+        for (lld, style) in &lld_variants {
+            if which(lld).is_err() {
+                continue;
+            }
+
+            let mut cmd = Command::new(lld);
+
+            match *style {
+                "msvc" => {
+                    // MSVC 风格
+                    cmd.arg("/ENTRY:main")
+                        .arg("/SUBSYSTEM:CONSOLE")
+                        .arg(format!("/OUT:{}", output_exe.display()))
+                        .arg("/DEFAULTLIB:libcmt")
+                        .arg("/DEFAULTLIB:kernel32")
+                        .arg(object_file);
+                }
+                "gnu" => {
+                    // GNU 风格
+                    cmd.arg("-o").arg(output_exe)
+                        .arg(object_file)
+                        .arg("-e").arg("main")
+                        .arg("-lkernel32");
+
+                    if self.platform == Platform::Windows {
+                        // Windows 下需要指定 C 库
+                        cmd.arg("-lmsvcrt");
+                    } else {
+                        cmd.arg("-lc");
+                    }
+                }
+                _ => continue,
+            }
+
+            println!("  尝试: {} ({}) {:?}", lld, style, cmd.get_args().collect::<Vec<_>>());
+
+            match cmd.output() {
+                Ok(output) if output.status.success() => {
+                    println!("✅ 使用 {} 链接成功", lld);
+                    return Ok(());
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!("⚠️  {} 失败: {}", lld, stderr.lines().next().unwrap_or("未知错误"));
+                }
+                Err(e) => {
+                    println!("⚠️  无法执行 {}: {}", lld, e);
+                }
+            }
+        }
+
+        Err(anyhow!("LLD 链接失败"))
+    }
+
+    /// 使用 MinGW GCC（备选方案）
+    fn link_with_mingw(&self, object_file: &Path, output_exe: &Path) -> Result<()> {
+        let gcc_variants = ["gcc", "x86_64-w64-mingw32-gcc"];
+
+        for gcc in &gcc_variants {
+            if which(gcc).is_err() {
+                continue;
+            }
+
+            // 方法1: 简单链接
+            let mut cmd = Command::new(gcc);
+            cmd.arg("-o").arg(output_exe).arg(object_file);
+
+            println!("  尝试: {} (简单) {:?}", gcc, cmd.get_args().collect::<Vec<_>>());
+
+            match cmd.output() {
+                Ok(output) if output.status.success() => {
+                    println!("✅ 使用 {} 链接成功", gcc);
+                    return Ok(());
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!("⚠️  {} 简单模式失败: {}", gcc, stderr.lines().next().unwrap_or("未知错误"));
+                }
+                Err(e) => {
+                    println!("⚠️  无法执行 {}: {}", gcc, e);
+                }
+            }
+
+            // 方法2: 显式指定 LLVM 兼容的 C 库
+            // LLVM 生成的代码通常期望链接到 msvcrt.dll，而不是 MinGW 的 C 库
+            let mut cmd = Command::new(gcc);
+            cmd.arg("-o").arg(output_exe)
+                .arg(object_file)
+                // 使用 -nostdlib 避免 MinGW 的 C 库
+                .arg("-nostdlib")
+                // 手动链接到 msvcrt.dll（Windows 原生 C 库）
+                .arg("-lmsvcrt")
+                .arg("-lkernel32")
+                // 添加 GCC 运行时（用于一些内部函数）
+                .arg("-lgcc");
+
+            println!("  尝试: {} (nostdlib) {:?}", gcc, cmd.get_args().collect::<Vec<_>>());
+
+            match cmd.output() {
+                Ok(output) if output.status.success() => {
+                    println!("✅ 使用 {} (nostdlib) 链接成功", gcc);
+                    return Ok(());
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    println!("⚠️  {} nostdlib 失败: {}", gcc, stderr);
+                }
+                Err(e) => {
+                    println!("⚠️  无法执行 {} nostdlib: {}", gcc, e);
+                }
+            }
+        }
+
+        Err(anyhow!("MinGW GCC 链接失败"))
     }
 }
 
-/// 检测当前平台
 fn detect_platform() -> Platform {
     match std::env::consts::OS {
         "windows" => Platform::Windows,
@@ -218,60 +294,4 @@ fn detect_platform() -> Platform {
         "macos" => Platform::MacOS,
         _ => Platform::Unknown,
     }
-}
-
-/// 检测可用的链接器
-fn detect_available_linkers(platform: Platform) -> Vec<LinkerType> {
-    let mut available = Vec::new();
-    
-    match platform {
-        Platform::Windows => {
-            // Windows 链接器优先级
-            let windows_linkers = [
-                (LinkerType::MsvcLink, "link"),
-                (LinkerType::LldLink, "lld-link"),
-                (LinkerType::MingwGcc, "x86_64-w64-mingw32-gcc"),
-                (LinkerType::MingwClang, "x86_64-w64-mingw32-clang"),
-                (LinkerType::Gcc, "gcc"),
-                (LinkerType::Clang, "clang"),
-            ];
-            
-            for (linker_type, cmd) in windows_linkers {
-                if Command::new(cmd).arg("--version").output().is_ok() {
-                    available.push(linker_type);
-                }
-            }
-        }
-        Platform::Linux | Platform::MacOS => {
-            // Unix-like 链接器优先级
-            let unix_linkers = [
-                (LinkerType::Gcc, "gcc"),
-                (LinkerType::Clang, "clang"),
-                (LinkerType::Ld, "ld"),
-            ];
-            
-            for (linker_type, cmd) in unix_linkers {
-                if Command::new(cmd).arg("--version").output().is_ok() {
-                    available.push(linker_type);
-                }
-            }
-        }
-        Platform::Unknown => {
-            // 未知平台，尝试所有链接器
-            let all_linkers = [
-                (LinkerType::Gcc, "gcc"),
-                (LinkerType::Clang, "clang"),
-                (LinkerType::MsvcLink, "link"),
-                (LinkerType::LldLink, "lld-link"),
-            ];
-            
-            for (linker_type, cmd) in all_linkers {
-                if Command::new(cmd).arg("--version").output().is_ok() {
-                    available.push(linker_type);
-                }
-            }
-        }
-    }
-    
-    available
 }

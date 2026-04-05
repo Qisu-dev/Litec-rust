@@ -1,13 +1,25 @@
+pub mod id;
 use std::{
-    cell::RefCell, ops::Range, path::Path, rc::Rc, sync::Once
+    cell::RefCell,
+    hash::Hash,
+    ops::Range,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::{Arc, Once},
 };
 
 use rustc_hash::FxHashMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StringId(pub usize);
 
-impl From::<&str> for StringId {
+impl StringId {
+    pub fn to_string(&self) -> String {
+        get_global_string(*self).unwrap().to_string()
+    }
+}
+
+impl From<&str> for StringId {
     fn from(value: &str) -> Self {
         intern_global(value)
     }
@@ -15,7 +27,12 @@ impl From::<&str> for StringId {
 
 impl std::fmt::Display for StringId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", get_global_string(*self).unwrap())
+        write!(f, "'{}'", get_global_string(*self).unwrap())
+    }
+}
+impl std::fmt::Debug for StringId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "'{}'", get_global_string(*self).unwrap())
     }
 }
 
@@ -30,10 +47,10 @@ impl StringPool {
     pub fn new() -> Self {
         Self {
             strings: Default::default(),
-            index_map: Default::default()
+            index_map: Default::default(),
         }
     }
-    
+
     /// 添加字符串到池中，返回其ID
     /// 如果字符串已存在，返回现有ID
     #[inline]
@@ -43,32 +60,32 @@ impl StringPool {
         if let Some(&id) = self.index_map.borrow().get(&s) {
             return id;
         }
-        
+
         // 创建新条目
         let id = StringId(self.strings.borrow().len());
         self.index_map.borrow_mut().insert(s.clone(), id);
         self.strings.borrow_mut().push(s);
         id
     }
-    
+
     /// 根据ID获取字符串的只读引用
     #[inline]
     pub fn get(&self, id: StringId) -> Option<Rc<str>> {
         self.strings.borrow().get(id.0).map(|v| v).cloned()
     }
-    
+
     /// 检查字符串是否已在池中
     #[inline]
     pub fn contains(&self, s: &str) -> bool {
         self.index_map.borrow().contains_key(s)
     }
-    
+
     /// 获取池中字符串数量
     #[inline]
     pub fn len(&self) -> usize {
         self.strings.borrow().len()
     }
-    
+
     /// 检查池是否为空
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -112,42 +129,36 @@ pub fn global_pool_len() -> usize {
 }
 
 // 在 litec_span 中确保 Span 包含行列信息
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Span {
     pub start: Location,
     pub end: Location,
     pub file: FileId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub struct Location {
     pub line: usize,
     pub column: usize,
     pub offset: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct LineCol {
     pub line: usize,   // 0-based
     pub column: usize, // 0-based（字符索引）
 }
 
-impl Default for Span {
-    fn default() -> Self {
-        Self {
-            start: Location { line: 0, column: 0, offset: 0 },
-            end: Location { line: 0, column: 0, offset: 0 },
-            file: FileId(0),
-        }
-    }
-}
-
 impl Span {
     pub fn new(start: Location, end: Location, file_id: FileId) -> Self {
-        assert!(start <= end, "Span start must <= end");
-        Self { start, end, file: file_id }
+        debug_assert!(start <= end, "Span start must <= end");
+        Self {
+            start,
+            end,
+            file: file_id,
+        }
     }
-    
+
     pub fn start(&self) -> Location {
         self.start
     }
@@ -155,21 +166,21 @@ impl Span {
     pub fn end(&self) -> Location {
         self.end
     }
-    
+
     pub fn len(&self) -> usize {
         self.end.offset - self.start.offset
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.start == self.end
     }
-    
+
     pub fn extend_to(&self, other: Span) -> Self {
-        assert!(self.file == other.file);
+        debug_assert!(self.file == other.file);
         let start = if self.start.offset > other.start.offset {
-            self.start
-        } else {
             other.start
+        } else {
+            self.start
         };
         let end = if self.end.offset > other.end.offset {
             self.end
@@ -180,11 +191,21 @@ impl Span {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Spanned<T> {
+    pub value: T,
+    pub span: Span,
+}
+
+pub fn respan<T>(span: Span, value: T) -> Spanned<T> {
+    Spanned { value, span }
+}
+
+#[derive(Debug, Clone)]
 pub struct SourceFile {
     pub name: String,
-    pub source:  String,
-    pub path: Box<Path>,
+    pub source: Arc<str>,
+    pub path: PathBuf,
     pub line_breaks: Vec<usize>,
 }
 
@@ -199,7 +220,12 @@ impl SourceFile {
         if breaks.last() != Some(&src.len()) {
             breaks.push(src.len());
         }
-        Self { name, source: src, path: path.into(), line_breaks: breaks }
+        Self {
+            name,
+            source: src.into(),
+            path: path.into(),
+            line_breaks: breaks,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -209,7 +235,7 @@ impl SourceFile {
     /// 字节偏移 → LineCol
     pub fn offset_to_linecol(&self, offset: usize) -> LineCol {
         let line = match self.line_breaks.binary_search(&offset) {
-            Ok(l)  => l,
+            Ok(l) => l,
             Err(l) => l.saturating_sub(1),
         };
         let col = offset - self.line_breaks[line];
@@ -218,10 +244,10 @@ impl SourceFile {
 
     pub fn location_from_offset(&self, offset: usize) -> Location {
         let line_col = self.offset_to_linecol(offset);
-        Location { 
-            line: line_col.line, 
-            column: line_col.column, 
-            offset: offset 
+        Location {
+            line: line_col.line,
+            column: line_col.column,
+            offset: offset,
         }
     }
 
@@ -237,8 +263,8 @@ impl SourceFile {
     /// 取第 line 行文本（不带换行符）
     pub fn line_text(&self, line: usize) -> &str {
         let start = self.line_breaks[line];
-        let end   = self.line_breaks[line + 1];
-        &self.source[start..end].trim_end_matches(&['\r', '\n'][..])
+        let end = self.line_breaks[line + 1];
+        &self.source[start..end]
     }
 
     /// 获取指定行的字节范围
@@ -262,25 +288,32 @@ impl SourceFile {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct FileId(pub usize);
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SourceMap {
     files: Vec<SourceFile>,
+    path_to_id: FxHashMap<PathBuf, FileId>,
 }
 
 impl SourceMap {
     pub fn new() -> Self {
         Self {
-            files: Vec::new()
+            files: Vec::new(),
+            path_to_id: FxHashMap::default(),
         }
     }
     /// 加文件，返回 FileId
     pub fn add_file(&mut self, name: String, src: String, path: &Path) -> FileId {
         let id = FileId(self.files.len());
         self.files.push(SourceFile::new(name, src, path));
+        self.path_to_id.insert(path.into(), id);
         id
+    }
+
+    pub fn path_to_id(&self, path: &PathBuf) -> Option<&FileId> {
+        self.path_to_id.get(path)
     }
 
     /// 取文件
@@ -295,7 +328,8 @@ impl SourceMap {
     /// 返回 (start_lc, end_lc)
     pub fn line_col(&self, span: Span) -> (LineCol, LineCol) {
         let f = self.file(span.file);
-        f.unwrap().line_col_range(span.start.offset, span.end.offset)
+        f.unwrap()
+            .line_col_range(span.start.offset, span.end.offset)
     }
 
     /// 取一行文本
