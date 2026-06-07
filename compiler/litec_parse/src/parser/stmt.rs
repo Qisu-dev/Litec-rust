@@ -1,83 +1,46 @@
 use litec_ast::{
-    ast::{DUMMY_NODE_ID, Mutability, Stmt, StmtKind},
+    ast::{DUMMY_NODE_ID, Stmt, StmtKind},
     token::TokenKind,
 };
+use litec_error::PResult;
 
 use crate::parser::Parser;
 
 impl<'a> Parser<'a> {
-    pub(super) fn parse_stmt(&mut self) -> Option<Stmt> {
+    pub(super) fn parse_stmt(&mut self) -> PResult<Stmt> {
         let span = self.current_token.span;
         let stmt_kind = self.parse_stmt_kind()?;
         let span = span.extend_to(self.last_token_end_span);
 
-        Some(Stmt {
+        Ok(Stmt {
             node_id: DUMMY_NODE_ID,
             kind: stmt_kind,
             span: span,
         })
     }
 
-    fn parse_stmt_kind(&mut self) -> Option<StmtKind> {
-        let stmt_result = match self.current_token.kind {
+    fn parse_stmt_kind(&mut self) -> PResult<StmtKind> {
+        match self.current_token.kind {
             TokenKind::Let => self.parse_let_statement(),
-            TokenKind::Return => self.parse_return_statement(),
-            TokenKind::Break => self.parse_break_statement(),
-            TokenKind::Continue => self.parse_continue_statement(),
+            TokenKind::Defer => self.parse_defer_statement(),
             _ => {
-                // 尝试解析为表达式语句
                 let expr = self.parse_expr()?;
-                let stmt = if self.current_token.kind == TokenKind::Semi {
-                    StmtKind::Semi(Box::new(expr))
+                if self.eat(TokenKind::Semi) {
+                    Ok(StmtKind::Semi(Box::new(expr)))
                 } else {
-                    StmtKind::Expr(Box::new(expr))
-                };
-
-                Some(stmt)
-            }
-        };
-
-        match stmt_result {
-            Some(stmt) => Some(stmt),
-            None => {
-                self.sync_to_stmt();
-
-                None
+                    Ok(StmtKind::Expr(Box::new(expr)))
+                }
             }
         }
     }
 
-    fn parse_continue_statement(&mut self) -> Option<StmtKind> {
-        self.advance();
-
-        Some(StmtKind::Continue)
-    }
-
-    fn parse_break_statement(&mut self) -> Option<StmtKind> {
-        self.advance();
-
-        let value = if self.current_token.kind != TokenKind::Semi {
-            Some(Box::new(self.parse_expr()?))
-        } else {
-            None
-        };
-
-        Some(StmtKind::Break(value))
-    }
-
-    fn parse_let_statement(&mut self) -> Option<StmtKind> {
+    fn parse_let_statement(&mut self) -> PResult<StmtKind> {
         self.advance(); // 消耗 `let`
 
-        let mutable = if self.eat(TokenKind::Mut) {
-            Mutability::Mutable
-        } else {
-            Mutability::Immutable
-        };
-
-        let name = self.parse_ident()?;
+        let name = self.parse_pat()?;
 
         let ty = if self.eat(TokenKind::Colon) {
-            Some(Box::new(self.parse_type()?))
+            Some(Box::new(self.parse_ty()?))
         } else {
             None
         };
@@ -88,18 +51,20 @@ impl<'a> Parser<'a> {
             None
         };
 
-        Some(StmtKind::Let(mutable, name, ty, value))
+        self.expect(TokenKind::Semi, self.expect_semi_error())?;
+
+        Ok(StmtKind::Let(name, ty, value))
     }
 
-    fn parse_return_statement(&mut self) -> Option<StmtKind> {
+    fn parse_defer_statement(&mut self) -> PResult<StmtKind> {
         self.advance();
 
-        let value = if self.current_token.kind != TokenKind::Semi {
-            Some(Box::new(self.parse_expr()?))
-        } else {
-            None
-        };
+        let expr = self.parse_expr()?;
 
-        Some(StmtKind::Return(value))
+        if expr.kind.expr_requires_semi_to_be_stmt() {
+            self.expect(TokenKind::Semi, self.expect_semi_error())?;
+        }
+
+        Ok(StmtKind::Defer(Box::new(expr)))
     }
 }

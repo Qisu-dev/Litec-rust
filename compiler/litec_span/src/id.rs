@@ -1,5 +1,5 @@
 use index_vec::{Idx, define_index_type};
-use std::hash::Hash;
+use std::{hash::Hash, u32};
 
 /// 标识一个 crate（当前或依赖）。
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
@@ -7,6 +7,7 @@ pub struct CrateNum(pub u32);
 
 /// 当前 crate 的专用编号（通常为 0）。
 pub const LOCAL_CRATE: CrateNum = CrateNum(0);
+pub const INVALID_CRATE: CrateNum = CrateNum(u32::MAX);
 
 impl Idx for CrateNum {
     fn from_usize(idx: usize) -> Self {
@@ -17,13 +18,42 @@ impl Idx for CrateNum {
     }
 }
 
-/// crate 内部的定义索引（原始值类型）。
-pub type DefIndex = u32;
-
-// 用宏定义 LocalDefId，使其实现 Idx
 define_index_type! {
-    /// 当前 crate 内的定义标识符（省略 crate 部分），连续分配。
-    pub struct LocalDefId = u32;
+    pub struct DefIndex = u32;
+    DEFAULT = DefIndex::from_raw_unchecked(u32::MAX);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LocalDefId {
+    pub local_def_index: DefIndex,
+}
+
+impl LocalDefId {
+    pub fn from_def_id(def_id: DefId) -> Self {
+        assert!(def_id.krate == LOCAL_CRATE);
+        Self {
+            local_def_index: def_id.index,
+        }
+    }
+
+    pub fn to_def_id(self) -> DefId {
+        DefId {
+            krate: LOCAL_CRATE,
+            index: self.local_def_index,
+        }
+    }
+}
+
+impl Idx for LocalDefId {
+    fn from_usize(idx: usize) -> Self {
+        Self {
+            local_def_index: DefIndex::from_usize(idx),
+        }
+    }
+
+    fn index(self) -> usize {
+        self.local_def_index.index()
+    }
 }
 
 // 用宏定义 ItemLocalId，使其实现 Idx
@@ -72,22 +102,10 @@ impl DefId {
     }
 }
 
-// ========== 转换方法 ==========
-
-impl LocalDefId {
-    /// 转换为全局 DefId（需提供当前 crate 编号）。
-    pub fn to_def_id(self, krate: CrateNum) -> DefId {
-        DefId {
-            krate,
-            index: self.index() as u32, // index() 返回 usize，转为 u32
-        }
-    }
-}
-
 impl OwnerId {
     /// 转换为全局 DefId（需提供当前 crate 编号）。
-    pub fn to_def_id(self, krate: CrateNum) -> DefId {
-        self.0.to_def_id(krate)
+    pub fn to_def_id(self) -> DefId {
+        self.0.to_def_id()
     }
 
     /// 获取内部的 LocalDefId。

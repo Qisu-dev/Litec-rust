@@ -6,8 +6,14 @@ edition = "2024"
 [dependencies]
 litec_ast = { path = "../litec_ast" }
 litec_hir = { path = "../litec_hir" }
+litec_middle = { path = "../litec_middle" }
 litec_span = { path = "../litec_span" }
-litec_error = { path = "../litec_error"}
-rustc-hash = "2.1.1"
+litec_error = { path = "../litec_error" }
+rustc-hash = "2.1.2"
+index_vec = "0.1.4"
 
-[lib]
+[dev-dependencies]
+bumpalo = "3.20.3"
+litec_parse = { path = "../litec_parse" }
+litec_resolve = { path = "../litec_resolve" }
+litec_session = { path = "../litec_session" }

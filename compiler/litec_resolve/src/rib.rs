@@ -9,6 +9,10 @@ use rustc_hash::FxHasher;
 pub enum RibKind {
     Normal,   // 普通块
     Function, // 函数参数
+    Struct,   // 结构体
+    Enum,
+    Trait,
+    TyAlias,
     Module,
 }
 

@@ -1,6 +1,7 @@
 use crate::{
     ast::{AssignOpKind, BinOpKind, RangeLimits},
-    token::{Token, TokenKind}, util::precedence::Precedence,
+    token::{Token, TokenKind},
+    util::precedence::Precedence,
 };
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -36,7 +37,7 @@ impl AssocOp {
             TokenKind::BitOr => Some(Binary(BinOpKind::BitOr)),
             TokenKind::BitOrEq => Some(AssignOp(AssignOpKind::BitOrAssign)),
             TokenKind::Or => Some(Binary(BinOpKind::Or)),
-            TokenKind::Add => Some(Binary(BinOpKind::Add)),
+            TokenKind::Plus => Some(Binary(BinOpKind::Add)),
             TokenKind::PlusEq => Some(AssignOp(AssignOpKind::AddAssign)),
             TokenKind::Mul => Some(Binary(BinOpKind::Mul)),
             TokenKind::MulEq => Some(AssignOp(AssignOpKind::MulAssign)),
@@ -80,7 +81,7 @@ impl AssocOp {
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Fixity {
-    Left,   // 左结合：a + b + c 解析为 (a + b) + c
-    Right,  // 右结合：a = b = c 解析为 a = (b = c)
-    None,   // 不可结合：a < b < c 非法
+    Left,  // 左结合：a + b + c 解析为 (a + b) + c
+    Right, // 右结合：a = b = c 解析为 a = (b = c)
+    None,  // 不可结合：a < b < c 非法
 }

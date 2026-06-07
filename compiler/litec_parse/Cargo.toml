@@ -3,8 +3,6 @@ name = "litec_parse"
 version = "0.1.0"
 edition = "2024"
 
-[lib]
-
 [dependencies]
 litec_ast = { path = "../litec_ast" }
 litec_span = { path = "../litec_span" }

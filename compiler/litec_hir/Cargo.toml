@@ -6,8 +6,9 @@ edition = "2024"
 [dependencies]
 litec_span = { path = "../litec_span" }
 litec_ast = { path = "../litec_ast" }
+litec_session = { path = "../litec_session" }
 
 rustc-hash = "2.1.1"
 index_vec = "0.1.4"
-
-[lib]
+rustc-stable-hash = "0.1.2"
+serde = { version = "1.0.228", features = ["derive"] }

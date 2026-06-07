@@ -7,8 +7,9 @@ edition = "2024"
 litec_span = { path = "../litec_span" }
 litec_ast = { path = "../litec_ast" }
 litec_hir = { path = "../litec_hir" }
+litec_session = { path = "../litec_session" }
+litec_error = { path = "../litec_error" }
+
 rustc-hash = "2.1.1"
 index_vec = "0.1.4"
 bumpalo = "3.20.2"
-
-[lib]

@@ -1,23 +1,12 @@
-use index_vec::IndexVec;
-use litec_ast::ast::{
-    AssignOpKind, BinOpKind, Ident, Lit, Mutability, RangeLimits, UnOp, Visibility,
-};
-use litec_span::Span;
-use litec_span::id::{DefId, HirId, ItemLocalId, LocalDefId, OwnerId};
-
 use crate::def::Res;
+use index_vec::IndexVec;
+use litec_ast::ast::{AssignOp, BinOp, Ident, Lit, Mutability, RangeLimits, UnOp, Visibility};
+use litec_span::Span;
+use litec_span::id::{DefId, HirId, ItemLocalId, OwnerId};
 
 #[derive(Debug, Clone)]
 pub struct Crate<'hir> {
-    pub owners: IndexVec<LocalDefId, IndexVec<ItemLocalId, Node<'hir>>>,
-}
-
-impl<'hir> Crate<'hir> {
-    pub fn new() -> Self {
-        Self {
-            owners: IndexVec::new(),
-        }
-    }
+    pub items: &'hir [&'hir Item<'hir>],
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +20,7 @@ pub struct PathSegment<'hir> {
 #[derive(Debug, Clone)]
 pub struct Path<'hir, R = Res> {
     pub res: R,
-    pub segments: &'hir [PathSegment<'hir>],
+    pub segments: &'hir [&'hir PathSegment<'hir>],
     pub span: Span,
 }
 
@@ -40,20 +29,20 @@ pub struct Path<'hir, R = Res> {
 pub struct Expr<'hir> {
     pub hir_id: HirId,
     pub span: Span,
-    pub kind: ExprKind<'hir>,
+    pub kind: &'hir ExprKind<'hir>,
 }
 
 /// 表达式种类。
 #[derive(Debug, Clone)]
 pub enum ExprKind<'hir> {
-    Binary(&'hir Expr<'hir>, BinOpKind, &'hir Expr<'hir>),
+    Binary(&'hir Expr<'hir>, BinOp, &'hir Expr<'hir>),
     Unary(UnOp, &'hir Expr<'hir>),
     Literal(Lit),
-    Path(&'hir Path<'hir>),
+    QPath(&'hir QPath<'hir>),
     Grouped(&'hir Expr<'hir>),
     Assignment(&'hir Expr<'hir>, &'hir Expr<'hir>),
-    AssignmentWithOp(&'hir Expr<'hir>, AssignOpKind, &'hir Expr<'hir>),
-    Call(&'hir Expr<'hir>, Vec<&'hir Expr<'hir>>),
+    AssignmentWithOp(&'hir Expr<'hir>, AssignOp, &'hir Expr<'hir>),
+    Call(&'hir Expr<'hir>, &'hir [&'hir Expr<'hir>]),
     Block(&'hir Block<'hir>),
     If(
         &'hir Expr<'hir>,
@@ -62,31 +51,39 @@ pub enum ExprKind<'hir> {
     ),
     While(&'hir Expr<'hir>, &'hir Block<'hir>),
     For {
-        variable: Ident,
+        variable: &'hir Pat<'hir>,
         iter: &'hir Expr<'hir>,
         body: &'hir Block<'hir>,
     },
     Index(&'hir Expr<'hir>, &'hir Expr<'hir>),
-    Range(
-        Option<&'hir Expr<'hir>>,
-        Option<&'hir Expr<'hir>>,
-        RangeLimits,
-    ),
+    Range(&'hir Expr<'hir>, &'hir Expr<'hir>, RangeLimits),
     Loop(&'hir Block<'hir>),
     Field(&'hir Expr<'hir>, Ident),
     Bool(bool),
-    Tuple(Vec<&'hir Expr<'hir>>),
+    Tuple(&'hir [&'hir Expr<'hir>]),
     Unit,
     AddressOf(&'hir Expr<'hir>),
-    StructExpr(StructExpr<'hir>),
+    StructExpr(&'hir StructExpr<'hir>),
     Cast(&'hir Expr<'hir>, &'hir Ty<'hir>),
+    Match(&'hir Expr<'hir>, &'hir [&'hir Arm<'hir>]),
+    Return(Option<&'hir Expr<'hir>>),
+    Continue,
+    Break(Option<&'hir Expr<'hir>>),
+}
+
+#[derive(Debug, Clone)]
+pub enum QPath<'hir> {
+    /// 完全解析的路径（如变量、函数、模块）
+    Resolved(&'hir Path<'hir>),
+    /// 类型限定路径，例如 `Type::name`，其中 Type 已解析为 Res，name 还需要查找
+    TypeRelative(Res, &'hir [&'hir PathSegment<'hir>]),
 }
 
 /// 结构体初始化表达式。
 #[derive(Debug, Clone)]
 pub struct StructExpr<'hir> {
     pub path: &'hir Path<'hir>,
-    pub fields: Vec<StructExprField<'hir>>,
+    pub fields: &'hir [&'hir StructExprField<'hir>],
 }
 
 /// 结构体初始化字段。
@@ -103,7 +100,7 @@ pub struct StructExprField<'hir> {
 pub struct Stmt<'hir> {
     pub hir_id: HirId,
     pub span: Span,
-    pub kind: StmtKind<'hir>,
+    pub kind: &'hir StmtKind<'hir>,
 }
 
 /// 语句种类。
@@ -112,22 +109,18 @@ pub enum StmtKind<'hir> {
     Expr(&'hir Expr<'hir>),
     Semi(&'hir Expr<'hir>),
     Let(
-        Mutability,
-        Ident,
+        &'hir Pat<'hir>,
         Option<&'hir Ty<'hir>>,
         Option<&'hir Expr<'hir>>,
     ),
-    Return(Option<&'hir Expr<'hir>>),
-    Continue,
-    Break(Option<&'hir Expr<'hir>>),
+    Defer(&'hir Expr<'hir>),
 }
 
 /// 块节点。
 #[derive(Debug, Clone)]
 pub struct Block<'hir> {
     pub hir_id: HirId,
-    pub stmts: Vec<&'hir Stmt<'hir>>,
-    pub tail: Option<&'hir Expr<'hir>>,
+    pub stmts: &'hir [&'hir Stmt<'hir>],
     pub span: Span,
 }
 
@@ -136,13 +129,13 @@ pub struct Block<'hir> {
 pub struct Ty<'hir> {
     pub hir_id: HirId,
     pub span: Span,
-    pub kind: TyKind<'hir>,
+    pub kind: &'hir TyKind<'hir>,
 }
 
 /// 类型种类。
 #[derive(Debug, Clone)]
 pub enum TyKind<'hir> {
-    Path(&'hir Path<'hir>),
+    QPath(&'hir QPath<'hir>),
     Never,
     Unit,
     Ref {
@@ -161,12 +154,13 @@ pub enum TyKind<'hir> {
         elem: &'hir Ty<'hir>,
     },
     Tuple {
-        elems: Vec<&'hir Ty<'hir>>,
+        elems: &'hir [&'hir Ty<'hir>],
     },
     FnPtr {
-        inputs: Vec<&'hir Ty<'hir>>,
+        inputs: &'hir [&'hir Ty<'hir>],
         output: &'hir Ty<'hir>,
     },
+    SelfTy,
     Infer,
 }
 
@@ -175,7 +169,6 @@ pub enum PrimTy {
     Int(IntTy),
     Uint(UintTy),
     Float(FloatTy),
-    Str,
     Bool,
     Char,
 }
@@ -221,17 +214,72 @@ pub struct Item<'hir> {
 /// 项种类。
 #[derive(Debug, Clone)]
 pub enum ItemKind<'hir> {
-    Fn(Fn<'hir>),
-    Struct(Ident, &'hir GenericParams<'hir>, Vec<Field<'hir>>),
+    Fn(&'hir Fn<'hir>),
+    Struct(Ident, &'hir Generics<'hir>, &'hir StructKind<'hir>),
     Use(&'hir UsePath<'hir>, UseKind),
-    Extern(Extern<'hir>),
+    ForeignMod(&'hir ForeignMod<'hir>),
     Module(Ident, &'hir Mod<'hir>),
+    Impl(&'hir Impl<'hir>),
+    Trait(Ident, &'hir Generics<'hir>, &'hir [&'hir TraitItem<'hir>]),
+    TypeAlias(&'hir TypeAlias<'hir>),
+    Enum(Ident, &'hir Generics<'hir>, &'hir [&'hir Variant<'hir>])
+}
+
+#[derive(Debug, Clone)]
+pub struct Variant<'hir> {
+    pub hir_id: HirId,
+    pub def_id: DefId,
+    pub name: Ident,
+    pub data: VariantData<'hir>,
+    pub ctor_def_id: Option<DefId>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum VariantData<'hir> {
+    Unit,
+    Tuple(&'hir [&'hir Ty<'hir>]),
+    Struct(&'hir [&'hir Field<'hir>]),
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeAlias<'hir> {
+    pub name: Ident,
+    pub generics: &'hir Generics<'hir>,
+    pub ty: &'hir Ty<'hir>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TraitItem<'hir> {
+    Fn(&'hir FnSig<'hir>),
+    TypeAlias(&'hir TypeAlias<'hir>),
+}
+
+#[derive(Debug, Clone)]
+pub struct Impl<'hir> {
+    pub generics: &'hir Generics<'hir>,
+    pub of_trait: Option<&'hir Path<'hir>>,
+    pub self_ty: &'hir Ty<'hir>,
+    pub items: &'hir [&'hir ImplItem<'hir>],
+}
+
+#[derive(Debug, Clone)]
+pub enum ImplItem<'hir> {
+    Fn(&'hir Fn<'hir>),
+    TypeAlias(Ident, &'hir Generics<'hir>, &'hir Ty<'hir>),
+}
+
+#[derive(Debug, Clone)]
+pub enum StructKind<'hir> {
+    Unit,
+    Tuple(&'hir [&'hir Ty<'hir>]),     // 元组字段类型列表
+    Struct(&'hir [&'hir Field<'hir>]), // 命名字段列表
 }
 
 /// 函数项。
 #[derive(Debug, Clone)]
 pub struct Fn<'hir> {
-    pub sig: FnSig<'hir>,
+    pub sig: &'hir FnSig<'hir>,
     pub body: &'hir Block<'hir>,
 }
 
@@ -239,19 +287,26 @@ pub struct Fn<'hir> {
 #[derive(Debug, Clone)]
 pub struct FnSig<'hir> {
     pub name: Ident,
-    pub generics: &'hir GenericParams<'hir>,
-    pub params: Vec<&'hir Param<'hir>>,
+    pub generics: &'hir Generics<'hir>,
+    pub params: &'hir [&'hir Param<'hir>],
     pub return_type: &'hir Ty<'hir>,
     pub is_variadic: bool,
 }
 
-/// 函数参数。
 #[derive(Debug, Clone)]
 pub struct Param<'hir> {
     pub hir_id: HirId,
-    pub name: Ident,
+    pub pat: &'hir Pat<'hir>,
     pub ty: &'hir Ty<'hir>,
     pub span: Span,
+    pub is_self: bool,
+    pub self_kind: Option<SelfKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfKind {
+    Value,   // self
+    Pointer, // *self
 }
 
 /// 结构体字段。
@@ -281,19 +336,34 @@ pub enum UseKind {
     Glob,
 }
 
-/// extern 块。
 #[derive(Debug, Clone)]
-pub struct Extern<'hir> {
+pub struct ForeignItem<'hir> {
+    pub hir_id: HirId,
+    pub def_id: DefId,
+    pub name: Ident,
+    pub vis: Visibility,
+    pub span: Span,
+    pub kind: ForeignItemKind<'hir>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ForeignItemKind<'hir> {
+    /// 外部函数声明
+    Fn(&'hir FnSig<'hir>),
+}
+
+/// extern 块
+#[derive(Debug, Clone)]
+pub struct ForeignMod<'hir> {
     pub abi: Option<Ident>,
-    pub items: Vec<Item<'hir>>,
+    pub items: &'hir [&'hir ForeignItem<'hir>],
 }
 
 #[derive(Debug, Clone)]
 pub struct Mod<'hir> {
-    pub items: &'hir [ItemId],
+    pub items: &'hir [&'hir Item<'hir>],
 }
 
-/// 所有 HIR 节点的统一枚举，用于在 `GlobalCtxt` 中存储。
 #[derive(Debug, Clone)]
 pub enum Node<'hir> {
     Expr(&'hir Expr<'hir>),
@@ -303,6 +373,10 @@ pub enum Node<'hir> {
     Block(&'hir Block<'hir>),
     Param(&'hir Param<'hir>),
     Field(&'hir Field<'hir>),
+    GenericParam(&'hir GenericParam<'hir>),
+    Pat(&'hir Pat<'hir>),
+    Arm(&'hir Arm<'hir>),
+    Variant(&'hir Variant<'hir>),
 }
 
 impl<'hir> Node<'hir> {
@@ -316,22 +390,33 @@ impl<'hir> Node<'hir> {
             Node::Block(b) => b.hir_id,
             Node::Param(p) => p.hir_id,
             Node::Field(f) => f.hir_id,
+            Node::GenericParam(p) => p.hir_id,
+            Node::Pat(p) => p.hir_id,
+            Node::Arm(a) => a.hir_id,
+            Node::Variant(v) => v.hir_id,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct GenericParams<'hir> {
-    pub params: &'hir [GenericParam],
+pub struct Generics<'hir> {
+    pub params: &'hir [&'hir GenericParam<'hir>],
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
-pub struct GenericParam {
+pub struct GenericParam<'hir> {
     pub hir_id: HirId,
     pub def_id: DefId,
     pub name: Ident,
     pub kind: GenericParamKind,
+    pub bounds: Option<&'hir Bounds<'hir>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Bounds<'hir> {
+    pub bounds: &'hir [&'hir Path<'hir>],
     pub span: Span,
 }
 
@@ -342,13 +427,62 @@ pub enum GenericParamKind {
 
 #[derive(Debug, Clone)]
 pub struct GenericArgs<'hir> {
-    pub args: &'hir [GenericArg<'hir>],
+    pub args: &'hir [&'hir GenericArg<'hir>],
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub enum GenericArg<'hir> {
     Type(&'hir Ty<'hir>),
+}
+
+/// 模式节点（用于 let、match 等）
+#[derive(Debug, Clone)]
+pub struct Pat<'hir> {
+    pub hir_id: HirId,
+    pub span: Span,
+    pub kind: &'hir PatKind<'hir>,
+}
+
+/// 模式种类
+#[derive(Debug, Clone)]
+pub enum PatKind<'hir> {
+    /// 通配符 `_`
+    Wild,
+    /// 绑定变量 `x` 或 `mut x`
+    Ident(Mutability, Ident),
+    /// 元组模式 `(a, b)`
+    Tuple(&'hir [&'hir Pat<'hir>]),
+    /// 结构体模式 `S { field: pat, .. }`
+    Struct(
+        &'hir Path<'hir>,
+        &'hir [&'hir StructFieldPat<'hir>],
+        bool, /* has_rest */
+    ),
+    /// 枚举变体模式 `E::Variant(pat)` 或 `E::Variant { field: pat }`
+    Enum(&'hir Path<'hir>, Option<&'hir Pat<'hir>>), // 简化：仅支持单元/元组变体，结构体变体可扩展
+    /// 字面量模式 `42` 或 `"hello"`
+    Lit(Lit),
+    /// 范围模式 `a..b` `a..=b`
+    Range(&'hir Expr<'hir>, &'hir Expr<'hir>, RangeLimits),
+    /// 或者模式 `p1 | p2`
+    Or(&'hir [&'hir Pat<'hir>]),
+}
+
+/// 结构体字段模式 `field: pat` 或 `field` (简写)
+#[derive(Debug, Clone)]
+pub struct StructFieldPat<'hir> {
+    pub name: Ident,
+    pub pat: &'hir Pat<'hir>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Arm<'hir> {
+    pub hir_id: HirId,
+    pub pat: &'hir Pat<'hir>,            // 模式
+    pub guard: Option<&'hir Expr<'hir>>, // 守卫条件 (如 `if x > 0`)
+    pub body: &'hir Expr<'hir>,          // 匹配体
 }
 
 #[derive(Debug, Clone, Copy)]

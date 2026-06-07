@@ -3,6 +3,7 @@ use crate::{
     util::{accos_op::Fixity, precedence::Precedence},
 };
 use litec_span::{Span, Spanned, StringId};
+use serde::{Deserialize, Serialize};
 
 index_vec::define_index_type! {
     pub struct NodeId = u32;
@@ -24,7 +25,7 @@ pub struct Crate {
     pub items: Vec<Item>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Visibility {
     Public,
     Inherited,
@@ -46,7 +47,7 @@ pub enum ItemKind {
     Fn(Fn),
     /// 一个结构体声明
     /// 例如 `struct Foo<A> { x: A }`
-    Struct(Ident, GenericParams, Vec<Field>),
+    Struct(Ident, Generics, StructKind),
     /// 一个使用声明
     /// e.g. `use foo;` `use foo::bar;` `use foo::bar as FooBar;`
     Use(UseTree),
@@ -60,24 +61,59 @@ pub enum ItemKind {
     /// 例如 `impl Foo { ... }` `impl<T> Foo<T> { ... }`
     Impl(Impl),
     /// 一个特征
-    /// 例如 `trait Foo { ... }`
-    Trait(Ident, Vec<TraitItem>) ,
+    /// 例如 `trait Foo<T> { ... }`
+    Trait(Ident, Generics, Vec<TraitItem>),
     /// 一个类型别名
     /// 例如 `type foo = i32;`
     TypeAlias(TypeAlias),
+    /// 一个枚举定义
+    /// 例如 `enum Result<T, E> { OK(T), Err(E) }`
+    Enum(Ident, Generics, Vec<Variant>),
+}
+
+#[derive(Debug, Clone)]
+pub enum StructKind {
+    Unit,               // struct Foo;
+    Tuple(Vec<Ty>),     // struct Foo(i32, bool);
+    Struct(Vec<Field>), // struct Foo { x: i32, y: bool }
+}
+
+#[derive(Debug, Clone)]
+pub struct Variant {
+    pub ident: Ident,
+    pub data: VariantData,
+    pub span: Span,
+    pub node_id: NodeId,
+}
+
+#[derive(Debug, Clone)]
+pub enum VariantData {
+    Struct(Vec<VariantField>),
+    Tuple(Vec<Ty>),
+    Unit,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariantField {
+    pub name: Ident,
+    pub ty: Ty,
+    pub span: Span,
+    pub node_id: NodeId,
 }
 
 pub type TraitItem = Item<TraitItemKind>;
 
 #[derive(Debug, Clone)]
 pub enum TraitItemKind {
-    Fn(Fn),
+    Fn(FnSig),
+    Type(TypeAlias),
 }
 
 #[derive(Debug, Clone)]
 pub struct Impl {
     pub node_id: NodeId,
-    pub generics: GenericParams,
+    pub generics: Generics,
+    /// 当impl trait时, of_trait为Some, 内容是trait的path
     pub of_trait: Option<Path>,
     pub self_ty: Box<Ty>,
     pub items: Vec<ImplItem>,
@@ -94,8 +130,8 @@ pub enum ImplItemKind {
 #[derive(Debug, Clone)]
 pub struct TypeAlias {
     pub node_id: NodeId,
-    pub ident: Ident,
-    pub generics: GenericParams,
+    pub name: Ident,
+    pub generics: Generics,
     pub ty: Ty,
 }
 
@@ -115,7 +151,7 @@ pub struct Fn {
 #[derive(Debug, Clone)]
 pub struct FnSig {
     pub name: Ident,
-    pub generics: GenericParams,
+    pub generics: Generics,
     pub params: Vec<Param>,
     pub return_type: FnRetTy,
     pub is_variadic: bool,
@@ -164,16 +200,23 @@ pub enum UseTreeKind {
 #[derive(Debug, Clone)]
 pub struct Param {
     pub node_id: NodeId,
-    pub name: Ident,
-    pub ty: Ty,
+    pub kind: ParamKind,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ParamKind {
+    Normal(Pat, Ty),
+    /// 比如 `*self` `*mut self`
+    SelfPtr(Mutability),
+    /// 比如 `self` `mut self`
+    SelfValue(Mutability),
 }
 
 #[derive(Debug, Clone)]
 pub struct Block {
     pub node_id: NodeId,
     pub stmts: Vec<Stmt>,
-    pub tail: Option<Box<Expr>>,
     pub span: Span,
 }
 
@@ -183,7 +226,6 @@ pub struct Field {
     pub name: Ident,
     pub ty: Ty,
     pub visibility: Visibility,
-    pub index: u32,
     pub span: Span,
 }
 
@@ -227,8 +269,7 @@ pub enum ExprKind {
     /// for循环
     /// 例如 `for i in 0..10 { 1 }`
     For {
-        mutability: Mutability,
-        variable: Ident,
+        variable: Pat,
         iter: Box<Expr>,
         body: Box<Block>,
     },
@@ -259,8 +300,50 @@ pub enum ExprKind {
     /// 取地址
     /// 例如 `&foo`
     AddressOf(Box<Expr>),
+    /// 结构体初始化
+    /// 例如 `Foo { foo }`
     StructExpr(StructExpr),
+    /// 类型转换
+    /// 例如 `foo as usize`
     Cast(Box<Expr>, Box<Ty>),
+    /// 模式匹配
+    /// 例如 `match foo { arm1 => { ... } , arm2 => ... }`
+    Match(Box<Expr>, Vec<Arm>),
+    /// 返回
+    /// 例如 `return 1;` `return ;`
+    Return(Option<Box<Expr>>),
+    /// 重新循环
+    /// 例如 `continue;`
+    Continue,
+    /// 跳出循环
+    /// 例如 `break;` `break 1;`
+    Break(Option<Box<Expr>>),
+}
+
+impl ExprKind {
+    pub fn expr_requires_semi_to_be_stmt(&self) -> bool {
+        !matches!(
+            self,
+            ExprKind::If(..)
+                | ExprKind::Loop(..)
+                | ExprKind::While(..)
+                | ExprKind::For { .. }
+                | ExprKind::Block(..)
+                | ExprKind::Match(..)
+                | ExprKind::Return(..)
+                | ExprKind::Continue
+                | ExprKind::Break(..)
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Arm {
+    pub pat: Pat,
+    pub guard: Option<Box<Expr>>, // if condition
+    pub body: Box<Expr>,
+    pub span: Span,
+    pub node_id: NodeId,
 }
 
 #[derive(Debug, Clone)]
@@ -272,12 +355,14 @@ pub struct Stmt {
 
 #[derive(Debug, Clone)]
 pub enum StmtKind {
+    /// 不带分号的表达式
+    /// 比如 `if cond { .. } else { .. }`
     Expr(Box<Expr>),
+    /// 带分号的表达式
+    /// 比如 `1;` `loop { .. };`
     Semi(Box<Expr>),
-    Let(Mutability, Ident, Option<Box<Ty>>, Option<Box<Expr>>),
-    Return(Option<Box<Expr>>),
-    Continue,
-    Break(Option<Box<Expr>>),
+    Let(Pat, Option<Box<Ty>>, Option<Box<Expr>>),
+    Defer(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -297,13 +382,7 @@ pub enum TyKind {
     /// 单元类型 `()`
     Unit,
 
-    /// 引用类型：`&T` 或 `&mut T`
-    /// 仅允许函数参数中使用 `&mut T`
-    Ref {
-        mutability: Mutability, // 不可变/可变
-        ty: Box<Ty>,
-    },
-    /// 原始指针：`*const T` / `*mut T`（unsafe 块内使用）
+    /// 原始指针：`*const T` / `*mut T`
     Ptr { mutability: Mutability, ty: Box<Ty> },
 
     /// 数组：`[T; 5]`
@@ -322,8 +401,8 @@ pub enum TyKind {
         output: Box<Ty>, // 返回类型
     },
 
-    /// `_` 用于类型推导
-    Infer,
+    /// 自身类型 `Self`
+    SelfTy,
 }
 
 #[derive(Debug, Clone)]
@@ -333,12 +412,33 @@ pub struct Path {
     pub span: Span,
 }
 
+impl ToString for Path {
+    fn to_string(&self) -> String {
+        self.segments
+            .iter()
+            .map(|seg| seg.name.text.to_string()) // 假设 StringId 实现了 ToString
+            .collect::<Vec<_>>()
+            .join("::")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PathSegment {
     pub node_id: NodeId,
     pub name: Ident,
     pub span: Span,
     pub generic_args: Option<GenericArgs>,
+}
+
+impl PathSegment {
+    pub fn from_ident(ident: Ident) -> Self {
+        Self {
+            node_id: DUMMY_NODE_ID,
+            name: ident,
+            span: ident.span,
+            generic_args: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -354,13 +454,13 @@ pub enum GenericArg {
 }
 
 #[derive(Debug, Clone)]
-pub struct GenericParams {
+pub struct Generics {
     pub node_id: NodeId,
-    pub params: Vec<GenericParam>,
+    pub params: Vec<Generic>,
     pub span: Span,
 }
 
-impl GenericParams {
+impl Generics {
     pub fn empty() -> Self {
         Self {
             node_id: DUMMY_NODE_ID,
@@ -375,9 +475,17 @@ impl GenericParams {
 }
 
 #[derive(Debug, Clone)]
-pub struct GenericParam {
+pub struct Generic {
     pub node_id: NodeId,
     pub name: Ident, // "T", "U"
+    pub bounds: Option<Bounds>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Bounds {
+    pub node_id: NodeId,
+    pub bounds: Vec<Path>, // Trait + Trait ...
     pub span: Span,
 }
 
@@ -388,6 +496,10 @@ pub struct Ident {
 }
 
 impl Ident {
+    pub fn new(text: StringId, span: Span) -> Self {
+        Self { text, span }
+    }
+
     pub fn to_string(&self) -> String {
         self.text.to_string()
     }
@@ -403,6 +515,13 @@ impl Ident {
             }],
             span: self.span,
         }
+    }
+}
+
+impl From<Ident> for StringId {
+    #[inline]
+    fn from(value: Ident) -> Self {
+        value.text
     }
 }
 
@@ -580,4 +699,39 @@ pub struct StructExprField {
 pub struct StrLit {
     pub text: StringId,
     pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Pat {
+    pub node_id: NodeId,
+    pub kind: PatKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum PatKind {
+    /// 通配符 `_`
+    Wild,
+    /// 标识符绑定，如 `x`, `mut x`
+    Ident(Mutability, Ident),
+    /// 元组模式 `(a, b, c)`
+    Tuple(Vec<Pat>),
+    /// 结构体模式 `Point { x, y }` 或 `Point { x: 1, y }`
+    Struct(Path, Vec<StructFieldPat>, bool), // bool 表示是否有 `..`
+    /// 枚举模式 `Some(x)` 或 `None`
+    Enum(Path, Option<Box<Pat>>),
+    /// 字面量模式 `0`, `"hello"`
+    Lit(Lit),
+    /// 范围模式 `1..=5`
+    Range(Box<Expr>, Box<Expr>, RangeLimits),
+    /// 多重模式 `1 | 2`
+    Or(Vec<Pat>),
+}
+
+#[derive(Debug, Clone)]
+pub struct StructFieldPat {
+    pub name: Ident,
+    pub pat: Pat,
+    pub span: Span,
+    pub node_id: NodeId,
 }

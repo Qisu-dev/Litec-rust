@@ -5,7 +5,5 @@ edition = "2024"
 
 [dependencies]
 litec_span = { path = "../litec_span" }
-litec_ty = { path = "../litec_ty" }
 index_vec = "0.1.4"
-
-[lib]
+serde = { version = "1.0.228", features = ["derive"] }

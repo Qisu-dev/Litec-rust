@@ -1,6 +1,19 @@
 use annotate_snippets::{AnnotationKind, Group, Level, Renderer, Snippet, renderer::DecorStyle};
 use litec_span::{SourceMap, Span};
 
+pub mod diag_ctxt;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorGuaranteed(pub(crate) ());
+
+impl ErrorGuaranteed {
+    pub(crate) fn new() -> Self {
+        Self(())
+    }
+}
+
+pub type PResult<T> = Result<T, ErrorGuaranteed>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextLines {
     Compact,  // 上下各1行
@@ -27,20 +40,20 @@ impl ContextLines {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiagnosticLevel {
+pub enum DiagLevel {
     Error,
     Warning,
     Note,
     Help,
 }
 
-impl DiagnosticLevel {
+impl DiagLevel {
     pub fn to_annotate_level(&'_ self) -> Level<'_> {
         match self {
-            DiagnosticLevel::Error => Level::ERROR,
-            DiagnosticLevel::Warning => Level::WARNING,
-            DiagnosticLevel::Note => Level::NOTE,
-            DiagnosticLevel::Help => Level::HELP,
+            DiagLevel::Error => Level::ERROR,
+            DiagLevel::Warning => Level::WARNING,
+            DiagLevel::Note => Level::NOTE,
+            DiagLevel::Help => Level::HELP,
         }
     }
 }
@@ -86,8 +99,8 @@ impl Default for FoldEmptyLines {
 }
 
 #[derive(Debug, Clone)]
-pub struct Diagnostic {
-    pub level: DiagnosticLevel,
+pub struct Diag {
+    pub level: DiagLevel,
     pub message: String,
     pub code: Option<String>,
     pub span: Span,
@@ -99,8 +112,8 @@ pub struct Diagnostic {
     sliced_sources: Vec<SlicedSource>,
 }
 
-impl Diagnostic {
-    pub fn new(level: DiagnosticLevel, message: impl Into<String>) -> Self {
+impl Diag {
+    pub fn new(level: DiagLevel, message: impl Into<String>) -> Self {
         Self {
             level,
             message: message.into(),
@@ -116,11 +129,11 @@ impl Diagnostic {
     }
 
     pub fn error(message: impl Into<String>) -> Self {
-        Self::new(DiagnosticLevel::Error, message)
+        Self::new(DiagLevel::Error, message)
     }
 
     pub fn warning(message: impl Into<String>) -> Self {
-        Self::new(DiagnosticLevel::Warning, message)
+        Self::new(DiagLevel::Warning, message)
     }
 
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
@@ -173,8 +186,8 @@ impl Diagnostic {
             return false;
         };
 
-        let start_lc = source_file.offset_to_linecol(self.span.start.offset);
-        let end_lc = source_file.offset_to_linecol(self.span.end.offset);
+        let start_lc = source_file.offset_to_linecol(self.span.lo.offset);
+        let end_lc = source_file.offset_to_linecol(self.span.hi.offset);
 
         let error_start_line = start_lc.line;
         let error_end_line = end_lc.line;
@@ -225,8 +238,8 @@ impl Diagnostic {
             if label.span.file != self.span.file {
                 if let Some(label_file) = source_map.file(label.span.file) {
                     if let Some(label_path) = label_file.path.to_str() {
-                        let label_start = label_file.offset_to_linecol(label.span.start.offset);
-                        let label_end = label_file.offset_to_linecol(label.span.end.offset);
+                        let label_start = label_file.offset_to_linecol(label.span.lo.offset);
+                        let label_end = label_file.offset_to_linecol(label.span.hi.offset);
 
                         let label_display_start = label_start.line.saturating_sub(context);
                         let label_display_end = (label_end.line + context)
@@ -281,12 +294,8 @@ impl Diagnostic {
 
         let main_source = &self.sliced_sources[0];
 
-        let adjusted_start = self
-            .span
-            .start
-            .offset
-            .saturating_sub(main_source.base_offset);
-        let adjusted_end = self.span.end.offset.saturating_sub(main_source.base_offset);
+        let adjusted_start = self.span.lo.offset.saturating_sub(main_source.base_offset);
+        let adjusted_end = self.span.hi.offset.saturating_sub(main_source.base_offset);
 
         let content_len = main_source.content.len();
         let adjusted_start = adjusted_start.min(content_len);
@@ -345,12 +354,12 @@ impl Diagnostic {
                     let label_source = &self.sliced_sources[source_idx];
                     let label_adjusted_start = label
                         .span
-                        .start
+                        .lo
                         .offset
                         .saturating_sub(label_source.base_offset);
                     let label_adjusted_end = label
                         .span
-                        .end
+                        .hi
                         .offset
                         .saturating_sub(label_source.base_offset);
 
@@ -373,16 +382,10 @@ impl Diagnostic {
                     source_idx += 1;
                 }
             } else {
-                let label_adjusted_start = label
-                    .span
-                    .start
-                    .offset
-                    .saturating_sub(main_source.base_offset);
-                let label_adjusted_end = label
-                    .span
-                    .end
-                    .offset
-                    .saturating_sub(main_source.base_offset);
+                let label_adjusted_start =
+                    label.span.lo.offset.saturating_sub(main_source.base_offset);
+                let label_adjusted_end =
+                    label.span.hi.offset.saturating_sub(main_source.base_offset);
 
                 let content_len = main_source.content.len();
                 let label_adjusted_start = label_adjusted_start.min(content_len);
@@ -428,10 +431,10 @@ impl Diagnostic {
 
     fn fallback_render(&self) -> String {
         let level_str = match self.level {
-            DiagnosticLevel::Error => "error",
-            DiagnosticLevel::Warning => "warning",
-            DiagnosticLevel::Note => "note",
-            DiagnosticLevel::Help => "help",
+            DiagLevel::Error => "error",
+            DiagLevel::Warning => "warning",
+            DiagLevel::Note => "note",
+            DiagLevel::Help => "help",
         };
         let code_str = self
             .code
@@ -531,80 +534,11 @@ fn extract_lines_remove_empty(source: &str, start_line: usize, end_line: usize) 
         .concat()
 }
 
-/// 便捷构建器
-pub struct DiagnosticBuilder(Diagnostic);
-
-impl DiagnosticBuilder {
-    pub fn new(level: DiagnosticLevel, message: impl Into<String>) -> Self {
-        Self(Diagnostic::new(level, message))
-    }
-
-    pub fn error(message: impl Into<String>) -> Self {
-        Self::new(DiagnosticLevel::Error, message)
-    }
-
-    pub fn warning(message: impl Into<String>) -> Self {
-        Self::new(DiagnosticLevel::Warning, message)
-    }
-
-    pub fn with_code(mut self, code: impl Into<String>) -> Self {
-        self.0.code = Some(code.into());
-        self
-    }
-
-    pub fn with_span(mut self, span: Span) -> Self {
-        self.0.span = span;
-        self
-    }
-
-    pub fn with_label(mut self, span: Span, message: impl Into<String>) -> Self {
-        self.0.labels.push(Label {
-            span,
-            message: message.into(),
-        });
-        self
-    }
-
-    pub fn with_note(mut self, note: impl Into<String>) -> Self {
-        self.0.notes.push(note.into());
-        self
-    }
-
-    pub fn with_help(mut self, help: impl Into<String>) -> Self {
-        self.0.help.push(help.into());
-        self
-    }
-
-    pub fn with_context_lines(mut self, context: ContextLines) -> Self {
-        self.0.context_lines = context;
-        self
-    }
-
-    pub fn with_fold_empty(mut self, fold: FoldEmptyLines) -> Self {
-        self.0.fold_empty = fold;
-        self
-    }
-
-    pub fn build(self) -> Diagnostic {
-        self.0
-    }
-
-    pub fn render(self, source_map: &SourceMap) -> String {
-        self.0.render(source_map)
-    }
-}
-
-impl From<DiagnosticBuilder> for Diagnostic {
-    fn from(value: DiagnosticBuilder) -> Self {
-        value.build()
-    }
-}
-
 // 便捷函数
-pub fn error(message: impl Into<String>) -> DiagnosticBuilder {
-    DiagnosticBuilder::error(message)
+pub fn error(message: impl Into<String>) -> Diag {
+    Diag::error(message)
 }
 
-pub fn warning(message: impl Into<String>) -> DiagnosticBuilder {
-    DiagnosticBuilder::warning(message)
+pub fn warning(message: impl Into<String>) -> Diag {
+    Diag::warning(message)
 }

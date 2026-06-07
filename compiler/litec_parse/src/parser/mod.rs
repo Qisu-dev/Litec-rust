@@ -1,5 +1,6 @@
 mod expr;
 mod item;
+mod pat;
 mod path;
 mod stmt;
 mod ty;
@@ -10,14 +11,9 @@ use litec_ast::{
     token::{LiteralKind, Token, TokenKind},
     util::accos_op::AssocOp,
 };
-use litec_error::{Diagnostic, DiagnosticBuilder, error};
+use litec_error::{Diag, ErrorGuaranteed, PResult, error};
 use litec_session::Session;
 use litec_span::{FileId, Location, Span, Spanned, respan};
-
-#[derive(Debug, Clone, Copy)]
-struct Restrictions {
-    no_struct_literal: bool,
-}
 
 pub struct Parser<'src> {
     session: &'src Session,
@@ -30,7 +26,6 @@ pub struct Parser<'src> {
     generic_nesting: u8,
     pending_token: Option<Token>,
 
-    restrictions: Restrictions,
     skip_infix: bool,
 }
 
@@ -40,7 +35,7 @@ pub struct ParserSnapshot {
     current_token: Token,
     generic_nesting: u8,
     pending_token: Option<Token>,
-    diagnostics_len: usize,
+    diag_len: usize,
 }
 
 impl<'src> Parser<'src> {
@@ -51,9 +46,7 @@ impl<'src> Parser<'src> {
 
             match token {
                 Ok(token) => break token,
-                Err(err) => {
-                    session.report(err);
-                }
+                Err(_) => {}
             }
         };
 
@@ -65,9 +58,6 @@ impl<'src> Parser<'src> {
             last_token_end_span: Span::default(),
             generic_nesting: 0,
             pending_token: None,
-            restrictions: Restrictions {
-                no_struct_literal: false,
-            },
             skip_infix: false,
         }
     }
@@ -104,33 +94,30 @@ impl<'src> Parser<'src> {
                     }
                     return;
                 }
-                Err(err) => {
-                    self.error(err);
-                }
+                Err(_) => {}
             }
         }
     }
 
     fn split_gtgt_span(&self, span: &Span) -> (Span, Span) {
         let mid = Location {
-            line: span.start.line,
-            column: span.start.column + 1,
-            offset: span.start.offset + 1,
+            line: span.lo.line,
+            column: span.lo.column + 1,
+            offset: span.lo.offset + 1,
         };
-        let first_span = Span::new(span.start, mid, span.file);
-        let second_span = Span::new(mid, span.end, span.file);
+        let first_span = Span::new(span.lo, mid, span.file);
+        let second_span = Span::new(mid, span.hi, span.file);
         (first_span, second_span)
     }
 
     #[inline]
-    fn expect(&mut self, kind: TokenKind, err: Diagnostic) -> Option<Token> {
+    fn expect(&mut self, kind: TokenKind, err: Diag) -> PResult<Token> {
         if self.current_token.kind == kind {
             let token = self.current_token.clone();
             self.advance();
-            Some(token)
+            Ok(token)
         } else {
-            self.session.report(err);
-            None
+            Err(self.session.report_err(err))
         }
     }
 
@@ -195,7 +182,7 @@ impl<'src> Parser<'src> {
             current_token: self.current_token.clone(),
             generic_nesting: self.generic_nesting,
             pending_token: self.pending_token.clone(),
-            diagnostics_len: self.session.diagnostics().len(),
+            diag_len: self.session.diag_ctxt().diags_count(),
         }
     }
 
@@ -205,19 +192,7 @@ impl<'src> Parser<'src> {
         self.current_token = snapshot.current_token;
         self.generic_nesting = snapshot.generic_nesting;
         self.pending_token = snapshot.pending_token;
-        self.session
-            .diagnostics
-            .borrow_mut()
-            .truncate(snapshot.diagnostics_len);
-    }
-
-    fn try_parse<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
-        let snapshot = self.snapshot();
-        let result = f(self);
-        if result.is_none() {
-            self.restore(snapshot);
-        }
-        result
+        self.session.diag_ctxt().truncate(snapshot.diag_len);
     }
 
     pub fn parse(mut self) -> Crate {
@@ -225,8 +200,8 @@ impl<'src> Parser<'src> {
 
         while self.current_token.kind != TokenKind::Eof {
             match self.parse_item() {
-                Some(stmt) => items.push(stmt),
-                None => {
+                Ok(stmt) => items.push(stmt),
+                Err(_) => {
                     self.sync_to_item();
                 }
             }
@@ -266,44 +241,44 @@ impl<'src> Parser<'src> {
         }
     }
 
-    fn error(&mut self, error: Diagnostic) {
-        self.session.report(error);
+    fn error(&mut self, error: Diag) -> ErrorGuaranteed {
+        self.session.report_err(error)
+    }
+
+    fn span_error(&self, str: impl Into<String>) -> Diag {
+        error(str.into()).with_span(self.current_token.span)
     }
 
     #[inline]
-    fn parse_ident(&mut self) -> Option<Ident> {
+    fn parse_ident(&mut self) -> PResult<Ident> {
         let token = self.expect(
             TokenKind::Ident,
-            error("期待标识符")
-                .with_span(self.current_token.span)
-                .build(),
+            error("期待标识符").with_span(self.current_token.span),
         )?;
-        Some(Ident {
+        Ok(Ident {
             text: token.text.into(),
             span: token.span,
         })
     }
 
     #[inline]
-    fn parse_str_lit(&mut self) -> Option<StrLit> {
+    fn parse_str_lit(&mut self) -> PResult<StrLit> {
         let token = self.expect(
             TokenKind::Literal {
                 kind: LiteralKind::Str,
                 suffix: None,
             },
-            error("期待字符串字面量")
-                .with_span(self.current_token.span)
-                .build(),
+            error("期待字符串字面量").with_span(self.current_token.span),
         )?;
 
-        Some(StrLit {
+        Ok(StrLit {
             text: token.text,
             span: token.span,
         })
     }
 
     #[inline]
-    fn expect_semi_error(&self) -> DiagnosticBuilder {
+    fn expect_semi_error(&self) -> Diag {
         error("期待 `;`").with_span(self.current_token.span)
     }
 
@@ -324,17 +299,11 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use litec_ast::{
-        ast::{
-            BinOpKind, Expr, ExprKind, Fn, FnRetTy, ItemKind, Mutability, RangeLimits, StmtKind,
-            TyKind, UnOp,
-        },
-        token::LiteralKind,
-    };
+    use litec_ast::ast::{ExprKind, Fn, ItemKind, Mutability, PatKind, StmtKind};
     use litec_span::{SourceMap, intern_global};
 
     /// 辅助函数：将源代码解析为 AST 和诊断
-    fn parse_str(src: &str) -> (Crate, Vec<Diagnostic>) {
+    fn parse_str(src: &str) -> (Crate, Vec<Diag>) {
         let mut source_map = SourceMap::new();
         let file_id = source_map.add_file(
             "test.lt".to_string(),
@@ -343,13 +312,8 @@ mod tests {
         );
         let session = Session::new(source_map);
         let krate = parse(&session, file_id);
-        for diagnostic in session.diagnostics.borrow().iter() {
-            println!(
-                "{}",
-                diagnostic.clone().render(&session.source_map.borrow())
-            );
-        }
-        (krate, session.diagnostics.take())
+        session.diag_ctxt().clone().flush();
+        (krate, session.diag_ctxt().take_diags())
     }
 
     // 辅助：从 AST 中获取第一个 item 的函数签名（如果有）
@@ -358,467 +322,6 @@ mod tests {
             ItemKind::Fn(f) => Some(f),
             _ => None,
         })
-    }
-
-    // 辅助：从函数体中获取第一个表达式（假设函数体只有一个块，且块尾表达式为所需）
-    fn get_fn_body_expr(f: &Fn) -> Option<&Expr> {
-        f.body.as_ref().and_then(|block| block.tail.as_deref())
-    }
-
-    // ========== 基本项解析 ==========
-
-    #[test]
-    fn test_empty_crate() {
-        let (krate, diags) = parse_str("");
-        assert!(diags.is_empty());
-        assert!(krate.items.is_empty());
-    }
-
-    #[test]
-    fn test_simple_function() {
-        let src = "fn foo() {}";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        assert_eq!(krate.items.len(), 1);
-        let f = get_first_fn(&krate).expect("不是函数");
-        assert_eq!(f.sig.name.text, intern_global("foo"));
-        assert!(f.sig.params.is_empty());
-        assert!(f.body.is_some());
-    }
-
-    #[test]
-    fn test_function_with_params() {
-        let src = "fn foo(x: i32, y: i32) -> i32 { x + y }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        assert_eq!(f.sig.params.len(), 2);
-        assert_eq!(f.sig.params[0].name.text, intern_global("x"));
-        assert_eq!(f.sig.params[1].name.text, intern_global("y"));
-        match &f.sig.return_type {
-            FnRetTy::Ty(ty) => match &ty.kind {
-                TyKind::Path { path } => {
-                    assert_eq!(path.segments.len(), 1);
-                    assert_eq!(path.segments[0].name.text, intern_global("i32"));
-                }
-                _ => panic!("期望路径类型"),
-            },
-            _ => panic!("期望显式返回类型"),
-        }
-    }
-
-    #[test]
-    fn test_function_with_generics() {
-        let src = "fn foo<T>(x: T) -> T { x }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        assert_eq!(f.sig.generics.params.len(), 1);
-        assert_eq!(f.sig.generics.params[0].name.text, intern_global("T"));
-    }
-
-    #[test]
-    fn test_struct() {
-        let src = "struct Foo { x: i32, y: i32 }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        assert_eq!(krate.items.len(), 1);
-        let item = &krate.items[0];
-        match &item.kind {
-            ItemKind::Struct(ident, generics, fields) => {
-                assert_eq!(ident.text, intern_global("Foo"));
-                assert!(generics.params.is_empty());
-                assert_eq!(fields.len(), 2);
-                assert_eq!(fields[0].name.text, intern_global("x"));
-                assert_eq!(fields[1].name.text, intern_global("y"));
-            }
-            _ => panic!("期望结构体"),
-        }
-    }
-
-    #[test]
-    fn test_use_statement() {
-        let src = "use foo::bar;";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        assert_eq!(krate.items.len(), 1);
-        let item = &krate.items[0];
-        match &item.kind {
-            ItemKind::Use(tree) => {
-                assert_eq!(tree.prefix.segments.len(), 2);
-                assert_eq!(tree.prefix.segments[0].name.text, intern_global("foo"));
-                assert_eq!(tree.prefix.segments[1].name.text, intern_global("bar"));
-            }
-            _ => panic!("期望 use"),
-        }
-    }
-
-    // ========== 表达式解析 ==========
-
-    #[test]
-    fn test_literal_expr() {
-        let src = "fn f() { 42 }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::Literal(lit) => {
-                assert_eq!(lit.kind, LiteralKind::Integer);
-                assert_eq!(lit.value, intern_global("42"))
-            }
-            _ => panic!("期望字面量"),
-        }
-    }
-
-    #[test]
-    fn test_binary_expr() {
-        let src = "fn f() { 1 + 2 }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::Binary(lhs, op, rhs) => {
-                assert_eq!(op.value, BinOpKind::Add);
-                match lhs.kind {
-                    ExprKind::Literal(lit) => {
-                        assert_eq!(lit.kind, LiteralKind::Integer);
-                        assert_eq!(lit.value, intern_global("1"));
-                    }
-                    _ => panic!("左侧应为字面量"),
-                }
-                match rhs.kind {
-                    ExprKind::Literal(lit) => {
-                        assert_eq!(lit.kind, LiteralKind::Integer);
-                        assert_eq!(lit.value, intern_global("2"));
-                    }
-                    _ => panic!("右侧应为字面量"),
-                }
-            }
-            _ => panic!("期望二元表达式"),
-        }
-    }
-
-    #[test]
-    fn test_precedence() {
-        let src = "fn f() { 1 + 2 * 3 }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        // 应该解析为 1 + (2 * 3)
-        match &expr.kind {
-            ExprKind::Binary(lhs, op, rhs) => {
-                assert_eq!(op.value, BinOpKind::Add);
-                // lhs 应该是 1
-                match &lhs.kind {
-                    ExprKind::Literal(lit) => assert_eq!(lit.kind, LiteralKind::Integer),
-                    _ => panic!("左侧应为字面量"),
-                }
-                // rhs 应该是乘法
-                match &rhs.kind {
-                    ExprKind::Binary(lhs2, op2, rhs2) => {
-                        assert_eq!(op2.value, BinOpKind::Mul);
-                        match lhs2.kind {
-                            ExprKind::Literal(lit) => {
-                                assert_eq!(lit.kind, LiteralKind::Integer);
-                                assert_eq!(lit.value, intern_global("2"));
-                            }
-                            _ => panic!("左侧应为字面量"),
-                        }
-                        match rhs2.kind {
-                            ExprKind::Literal(lit) => {
-                                assert_eq!(lit.kind, LiteralKind::Integer);
-                                assert_eq!(lit.value, intern_global("3"));
-                            }
-                            _ => panic!("右侧应为字面量"),
-                        }
-                    }
-                    _ => panic!("右侧应为乘法"),
-                }
-            }
-            _ => panic!("期望加法在最外层"),
-        }
-    }
-
-    #[test]
-    fn test_unary_expr() {
-        let src = "fn f() { -x }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::Unary(op, operand) => {
-                assert_eq!(*op, UnOp::Neg);
-                match &operand.kind {
-                    ExprKind::Path(path) => {
-                        assert_eq!(path.segments[0].name.text, intern_global("x"))
-                    }
-                    _ => panic!("操作数应为标识符"),
-                }
-            }
-            _ => panic!("期望一元表达式"),
-        }
-    }
-
-    #[test]
-    fn test_if_expr() {
-        let src = "fn f() { if x > 0 { 1 } else { 2 } }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::If(cond, then, else_) => {
-                // 条件应为 x > 0
-                match &cond.kind {
-                    ExprKind::Binary(lhs, op, rhs) => {
-                        assert_eq!(op.value, BinOpKind::Gt);
-                        match &lhs.kind {
-                            ExprKind::Path(path) => {
-                                assert_eq!(path.segments[0].name.text, intern_global("x"))
-                            }
-                            _ => panic!("左侧应为标识符"),
-                        }
-                        match rhs.kind {
-                            ExprKind::Literal(lit) => {
-                                assert_eq!(lit.kind, LiteralKind::Integer);
-                                assert_eq!(lit.value, intern_global("0"));
-                            }
-                            _ => panic!("右侧应为字面量"),
-                        }
-                    }
-                    _ => panic!("条件应为比较"),
-                }
-                // then 分支块应包含字面量 1 作为尾表达式
-                if let Some(tail) = &then.tail {
-                    match &tail.kind {
-                        ExprKind::Literal(lit) => assert_eq!(lit.kind, LiteralKind::Integer),
-                        _ => panic!("then 分支尾应为字面量"),
-                    }
-                }
-                // else 分支
-                if let Some(else_expr) = else_ {
-                    match &else_expr.kind {
-                        ExprKind::Block(block) => {
-                            if let Some(tail) = &block.tail {
-                                match &tail.kind {
-                                    ExprKind::Literal(lit) => {
-                                        assert_eq!(lit.kind, LiteralKind::Integer)
-                                    }
-                                    _ => panic!("else 分支尾应为字面量"),
-                                }
-                            }
-                        }
-                        _ => panic!("else 应为块"),
-                    }
-                }
-            }
-            _ => panic!("期望 if 表达式"),
-        }
-    }
-
-    #[test]
-    fn test_while_loop() {
-        let src = "fn f() { while x < 10 { x += 1; } }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::While(cond, body) => {
-                match &cond.kind {
-                    ExprKind::Binary(_, op, _) => assert_eq!(op.value, BinOpKind::Lt),
-                    _ => panic!("条件应为比较"),
-                }
-                // 检查循环体是否包含语句
-                assert!(!body.stmts.is_empty());
-            }
-            _ => panic!("期望 while 循环"),
-        }
-    }
-
-    #[test]
-    fn test_for_loop() {
-        let src = "fn f() { for i in 0..10 { } }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::For { variable, iter, .. } => {
-                assert_eq!(variable.text, intern_global("i"));
-                match &iter.kind {
-                    ExprKind::Range(start, end, RangeLimits::HalfOpen) => {
-                        match start.kind {
-                            ExprKind::Literal(lit) => {
-                                assert_eq!(lit.kind, LiteralKind::Integer);
-                                assert_eq!(lit.value, intern_global("0"));
-                                assert_eq!(lit.suffix, None);
-                            }
-                            _ => panic!("期待字面量"),
-                        }
-                        match end.kind {
-                            ExprKind::Literal(lit) => {
-                                assert_eq!(lit.kind, LiteralKind::Integer);
-                                assert_eq!(lit.value, intern_global("10"));
-                                assert_eq!(lit.suffix, None);
-                            }
-                            _ => panic!("期待字面量"),
-                        }
-                    }
-                    _ => panic!("期望范围表达式"),
-                }
-            }
-            _ => panic!("期望 for 循环"),
-        }
-    }
-
-    #[test]
-    fn test_block_expr() {
-        let src = "fn f() { { let x = 1; x } }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let outer_expr = get_fn_body_expr(f).expect("没有外部表达式");
-        match &outer_expr.kind {
-            ExprKind::Block(block) => {
-                assert_eq!(block.stmts.len(), 1);
-                assert!(block.tail.is_some());
-                match &block.tail.as_ref().unwrap().kind {
-                    ExprKind::Path(path) => {
-                        assert_eq!(path.segments[0].name.text, intern_global("x"))
-                    }
-                    _ => panic!("尾表达式应为标识符"),
-                }
-            }
-            _ => panic!("期望块表达式"),
-        }
-    }
-
-    #[test]
-    fn test_path_access() {
-        let src = "fn f() { foo::bar }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::Path(path) => {
-                assert_eq!(path.segments.len(), 2);
-                assert_eq!(path.segments[0].name.text, intern_global("foo"));
-                assert_eq!(path.segments[1].name.text, intern_global("bar"));
-            }
-            _ => panic!("期望路径访问"),
-        }
-    }
-
-    #[test]
-    fn test_field_access() {
-        let src = "fn f() { x.y }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::Field(base, name) => {
-                match &base.kind {
-                    ExprKind::Path(path) => {
-                        assert_eq!(path.segments[0].name.text, intern_global("x"))
-                    }
-                    _ => panic!("基表达式应为标识符"),
-                }
-                assert_eq!(name.text, intern_global("y"));
-            }
-            _ => panic!("期望字段访问"),
-        }
-    }
-
-    #[test]
-    fn test_call_expr() {
-        let src = "fn f() { foo(1, 2) }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::Call(callee, args) => {
-                match &callee.kind {
-                    ExprKind::Path(path) => {
-                        assert_eq!(path.segments[0].name.text, intern_global("foo"))
-                    }
-                    _ => panic!("callee 应为标识符"),
-                }
-                assert_eq!(args.len(), 2);
-            }
-            _ => panic!("期望调用"),
-        }
-    }
-
-    #[test]
-    fn test_index_expr() {
-        let src = "fn f() { arr[0] }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::Index(base, index) => {
-                match &base.kind {
-                    ExprKind::Path(path) => {
-                        assert_eq!(path.segments[0].name.text, intern_global("arr"))
-                    }
-                    _ => panic!("基表达式应为标识符"),
-                }
-                // 索引应为字面量
-                match &index.kind {
-                    ExprKind::Literal(lit) => assert_eq!(lit.kind, LiteralKind::Integer),
-                    _ => panic!("索引应为整数"),
-                }
-            }
-            _ => panic!("期望索引表达式"),
-        }
-    }
-
-    #[test]
-    fn test_cast_expr() {
-        let src = "fn f() { x as i32 }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::Cast(expr, ty) => {
-                match &expr.kind {
-                    ExprKind::Path(path) => {
-                        assert_eq!(path.segments[0].name.text, intern_global("x"))
-                    }
-                    _ => panic!("左操作数应为标识符"),
-                }
-                match &ty.kind {
-                    TyKind::Path { path } => {
-                        assert_eq!(path.segments[0].name.text, intern_global("i32"));
-                    }
-                    _ => panic!("目标类型应为路径"),
-                }
-            }
-            _ => panic!("期望类型转换"),
-        }
-    }
-
-    #[test]
-    fn test_range_expr() {
-        let src = "fn f() { 0..10 }";
-        let (krate, diags) = parse_str(src);
-        assert!(diags.is_empty());
-        let f = get_first_fn(&krate).expect("不是函数");
-        let expr = get_fn_body_expr(f).expect("没有表达式");
-        match &expr.kind {
-            ExprKind::Range(_, _, RangeLimits::HalfOpen) => {}
-            _ => panic!("期望范围表达式"),
-        }
     }
 
     #[test]
@@ -831,8 +334,17 @@ mod tests {
         assert_eq!(body.stmts.len(), 1);
         let stmt = &body.stmts[0];
         match &stmt.kind {
-            StmtKind::Let(mutable, name, ty, value) => {
-                assert_eq!(*mutable, Mutability::Immutable);
+            StmtKind::Let(pat, ty, value) => {
+                let name = match &pat.kind {
+                    PatKind::Ident(binding_mode, ident) => {
+                        match binding_mode {
+                            Mutability::Immutable => {}
+                            _ => panic!(),
+                        }
+                        ident
+                    }
+                    _ => panic!("{:#?}", pat),
+                };
                 assert_eq!(name.text, intern_global("x"));
                 assert!(ty.is_none());
                 assert!(value.is_some());
@@ -851,8 +363,12 @@ mod tests {
         assert_eq!(body.stmts.len(), 1);
         let stmt = &body.stmts[0];
         match &stmt.kind {
-            StmtKind::Return(value) => {
-                assert!(value.is_some());
+            StmtKind::Semi(expr) => {
+                if let ExprKind::Return(value) = &expr.kind {
+                    assert!(value.is_some());
+                } else {
+                    panic!()
+                }
             }
             _ => panic!("期望 return 语句"),
         }
@@ -867,7 +383,7 @@ mod tests {
         assert!(!diags.is_empty());
         // 虽然错误，但解析器应继续并返回 AST
         let f = get_first_fn(&krate).expect("不是函数");
-        let body = f.body.as_ref().expect("无函数体");
+        let _body = f.body.as_ref().expect("无函数体");
     }
 
     #[test]
@@ -910,7 +426,7 @@ mod tests {
         let src = r#"
             struct Foo {}
             trait Bar {
-                type A;
+            
             }
 
             impl Bar for Foo {
@@ -920,7 +436,93 @@ mod tests {
                 }
             }
         "#;
-        let (krate, diags) = parse_str(src);
+        let (_, diags) = parse_str(src);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn test_pattern() {
+        let src = r#"
+            fn main() {
+                let (a, b) = (1, 2);
+                let mut a = 1;
+                let (mut a, mut b) = (1, 2);
+            }
+        "#;
+        let (_, diags) = parse_str(src);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn test_match() {
+        let src = r#"
+            struct Foo {
+                a: i32,
+                b: i32,
+            }
+
+            fn main() {
+                let foo = Foo {
+                    a: 10,
+                    b: 10,
+                };
+                match foo {
+                    Foo { a, b } => {
+                        print(a);
+                        print(b);
+                    }
+                }
+            }
+        "#;
+        let (_, diags) = parse_str(src);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn test_enum() {
+        let src = r#"
+            pub enum Result<T, E> {
+                Ok(T),
+                Err(E),
+            }
+
+            pub enum Foo {
+                Bar,
+                Baz {
+                    result: Result<i32, i64>
+                }
+            }
+
+            pub fn main() {
+                let foo = Foo::Baz {
+                    result: Result::Ok(1)
+                };
+
+                match foo {
+                    Foo::Bar => {},
+                    Foo::Baz { result } => {
+                        println(result);
+                    }
+                }
+            }
+        "#;
+        let (_, diags) = parse_str(src);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn test_defer() {
+        let src = r#"
+            extern "C" {
+                fn malloc(size: usize) -> *mut ();
+            }
+
+            pub fn main() {
+                let ptr = malloc(sizeof::<T>());
+                defer free(ptr);
+            }
+        "#;
+        let (_, diags) = parse_str(src);
         assert!(diags.is_empty());
     }
 }

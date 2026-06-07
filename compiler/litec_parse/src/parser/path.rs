@@ -2,7 +2,7 @@ use litec_ast::{
     ast::{DUMMY_NODE_ID, GenericArgs, Ident, Path, PathSegment},
     token::TokenKind,
 };
-use litec_error::error;
+use litec_error::{PResult, error};
 
 use crate::parser::Parser;
 
@@ -19,7 +19,7 @@ pub enum PathStyle {
 }
 
 impl<'a> Parser<'a> {
-    pub fn parse_path(&mut self, style: PathStyle) -> Option<Path> {
+    pub fn parse_path(&mut self, style: PathStyle) -> PResult<Path> {
         let span = self.current_token.span;
         let mut segments = Vec::new();
 
@@ -52,14 +52,13 @@ impl<'a> Parser<'a> {
                     self.error(
                         error("模块路径中不允许泛型参数")
                             .with_span(segment.span)
-                            .with_help("移除 `<...>` 或使用类型路径")
-                            .build(),
+                            .with_help("移除 `<...>` 或使用类型路径"),
                     );
                 }
             }
         }
 
-        Some(Path {
+        Ok(Path {
             node_id: DUMMY_NODE_ID,
             segments,
             span: span.extend_to(self.last_token_end_span),
@@ -67,7 +66,7 @@ impl<'a> Parser<'a> {
     }
 
     /// 解析单个路径段：ident 或 ident::<args> 或 ident<args>
-    fn parse_path_segment(&mut self, style: PathStyle) -> Option<PathSegment> {
+    pub(super) fn parse_path_segment(&mut self, style: PathStyle) -> PResult<PathSegment> {
         let name = match self.current_token.kind {
             TokenKind::Ident => Ident {
                 text: self.current_token.text,
@@ -80,15 +79,13 @@ impl<'a> Parser<'a> {
                         span: self.current_token.span,
                     }
                 } else {
-                    self.error(
+                    return Err(self.error(
                         error("在非路径中禁止使用 `super` `crate` `self`")
-                            .with_span(self.current_token.span)
-                            .build(),
-                    );
-                    return None;
+                            .with_span(self.current_token.span),
+                    ));
                 }
             }
-            _ => return None,
+            _ => return Err(self.error(error("不期待的token").with_span(self.current_token.span))),
         };
         self.advance();
 
@@ -100,7 +97,7 @@ impl<'a> Parser<'a> {
             .map(|args| name.span.extend_to(args.span))
             .unwrap_or(name.span);
 
-        Some(PathSegment {
+        Ok(PathSegment {
             node_id: DUMMY_NODE_ID,
             name,
             span,
@@ -108,7 +105,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_generic_args_if_allowed(&mut self, style: PathStyle) -> Option<Option<GenericArgs>> {
+    fn parse_generic_args_if_allowed(&mut self, style: PathStyle) -> PResult<Option<GenericArgs>> {
         match style {
             PathStyle::Type => {
                 // Type 风格：< 总是泛型
@@ -116,9 +113,9 @@ impl<'a> Parser<'a> {
                     self.generic_nesting += 1;
                     let args = self.parse_generic_args()?;
                     self.generic_nesting -= 1;
-                    Some(Some(args))
+                    Ok(Some(args))
                 } else {
-                    Some(None)
+                    Ok(None)
                 }
             }
 
@@ -131,30 +128,25 @@ impl<'a> Parser<'a> {
                         self.generic_nesting += 1;
                         let args = self.parse_generic_args()?;
                         self.generic_nesting -= 1;
-                        Some(Some(args))
+                        Ok(Some(args))
                     } else {
                         // 普通路径分隔符，不解析泛型参数
-                        Some(None)
+                        Ok(None)
                     }
                 } else if self.current_token.kind == TokenKind::Lt {
                     // 没有 ::，< 视为比较运算符，不解析泛型
-                    Some(None)
+                    Ok(None)
                 } else {
-                    Some(None)
+                    Ok(None)
                 }
             }
 
             PathStyle::Mod | PathStyle::Attr => {
                 // Mod, Attr 风格：不允许泛型，但继续解析（后续统一报错）
                 if self.current_token.kind == TokenKind::Lt {
-                    self.error(
-                        error("路径不允许泛型")
-                            .with_span(self.current_token.span)
-                            .build(),
-                    );
-                    return None;
+                    Err(self.error(error("路径不允许泛型").with_span(self.current_token.span)))
                 } else {
-                    Some(None)
+                    Ok(None)
                 }
             }
         }

@@ -1,41 +1,48 @@
-use std::cell::{Ref, RefCell};
-
-use litec_error::Diagnostic;
+use litec_error::{Diag, ErrorGuaranteed, diag_ctxt::DiagCtxt};
 use litec_span::SourceMap;
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    rc::Rc,
+};
 
-/// 编译会话
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Session {
-    /// 源文件映射
-    pub source_map: RefCell<SourceMap>,
-    pub diagnostics: RefCell<Vec<Diagnostic>>,
+    source_map: Rc<RefCell<SourceMap>>,
+    diag_ctxt: DiagCtxt,
 }
 
 impl Session {
     pub fn new(source_map: SourceMap) -> Self {
+        let source_map = Rc::new(RefCell::new(source_map));
+        let diag_ctxt = DiagCtxt::new(source_map.clone());
         Self {
-            source_map: source_map.into(),
-            diagnostics: Vec::new().into(),
+            source_map,
+            diag_ctxt,
         }
     }
 
-    /// 报告一个诊断
-    pub fn report(&self, diagnostic: Diagnostic) {
-        self.diagnostics.borrow_mut().push(diagnostic.clone());
+    pub fn report(&self, diag: Diag) -> Option<ErrorGuaranteed> {
+        self.diag_ctxt.emit(diag)
     }
 
-    /// 获取所有诊断（用于最后输出统计）
-    pub fn diagnostics(&self) -> Ref<'_, Vec<Diagnostic>> {
-        self.diagnostics.borrow()
+    pub fn report_err(&self, diag: Diag) -> ErrorGuaranteed {
+        self.diag_ctxt.emit_err(diag)
     }
 
-    pub fn print_diagnotics(&self) {
-        for diagnostic in self.diagnostics.borrow().clone() {
-            println!("{}", diagnostic.render(&self.source_map.borrow()));
-        }
+    pub fn diag_ctxt(&self) -> &DiagCtxt {
+        &self.diag_ctxt
     }
 
-    pub fn borrow_source_map(&self) -> Ref<'_, SourceMap> {
+    /// 获取源代码映射（只读）
+    pub fn source_map(&self) -> Ref<'_, SourceMap> {
         self.source_map.borrow()
+    }
+
+    pub fn mut_source_map(&self) -> RefMut<'_, SourceMap> {
+        self.source_map.borrow_mut()
+    }
+
+    pub fn error_count(&self) -> usize {
+        self.diag_ctxt.diags_count()
     }
 }

@@ -128,11 +128,10 @@ pub fn global_pool_len() -> usize {
     get_global_string_pool().len()
 }
 
-// 在 litec_span 中确保 Span 包含行列信息
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Span {
-    pub start: Location,
-    pub end: Location,
+    pub lo: Location,
+    pub hi: Location,
     pub file: FileId,
 }
 
@@ -150,42 +149,42 @@ pub struct LineCol {
 }
 
 impl Span {
-    pub fn new(start: Location, end: Location, file_id: FileId) -> Self {
-        debug_assert!(start <= end, "Span start must <= end");
+    pub fn new(lo: Location, hi: Location, file_id: FileId) -> Self {
+        debug_assert!(lo <= hi, "Span start must <= end");
         Self {
-            start,
-            end,
+            lo,
+            hi,
             file: file_id,
         }
     }
 
     pub fn start(&self) -> Location {
-        self.start
+        self.lo
     }
 
     pub fn end(&self) -> Location {
-        self.end
+        self.hi
     }
 
     pub fn len(&self) -> usize {
-        self.end.offset - self.start.offset
+        self.hi.offset - self.lo.offset
     }
 
     pub fn is_empty(&self) -> bool {
-        self.start == self.end
+        self.lo == self.hi
     }
 
     pub fn extend_to(&self, other: Span) -> Self {
         debug_assert!(self.file == other.file);
-        let start = if self.start.offset > other.start.offset {
-            other.start
+        let start = if self.lo.offset > other.lo.offset {
+            other.lo
         } else {
-            self.start
+            self.lo
         };
-        let end = if self.end.offset > other.end.offset {
-            self.end
+        let end = if self.hi.offset > other.hi.offset {
+            self.hi
         } else {
-            other.end
+            other.hi
         };
         Self::new(start, end, self.file)
     }
@@ -279,7 +278,7 @@ impl SourceFile {
     }
 
     pub fn get_text_from_span(&self, span: Span) -> &str {
-        &self.source[span.start.offset..span.end.offset]
+        &self.source[span.lo.offset..span.hi.offset]
     }
 
     /// 获取源文件文本
@@ -328,8 +327,7 @@ impl SourceMap {
     /// 返回 (start_lc, end_lc)
     pub fn line_col(&self, span: Span) -> (LineCol, LineCol) {
         let f = self.file(span.file);
-        f.unwrap()
-            .line_col_range(span.start.offset, span.end.offset)
+        f.unwrap().line_col_range(span.lo.offset, span.hi.offset)
     }
 
     /// 取一行文本

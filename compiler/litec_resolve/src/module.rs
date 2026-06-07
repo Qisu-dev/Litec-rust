@@ -1,5 +1,4 @@
 use crate::rib::{Rib, RibKind};
-use indexmap::IndexMap;
 use litec_ast::ast::{Ident, NodeId, Visibility};
 use litec_hir::def::Res;
 use litec_span::id::DefId;

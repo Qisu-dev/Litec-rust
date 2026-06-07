@@ -1,16 +1,12 @@
-use std::cell::Ref;
-use std::sync::Arc;
-
 use litec_ast::token::LiteralKind::*;
 use litec_ast::token::TokenKind::*;
 use litec_ast::token::{Token, TokenKind};
-use litec_error::{Diagnostic, error};
+use litec_error::PResult;
+use litec_error::error;
 use litec_session::Session;
-use litec_span::{FileId, SourceFile, SourceMap, Span, intern_global};
+use litec_span::{FileId, SourceFile, Span, intern_global};
+use std::cell::Ref;
 use unicode_properties::UnicodeEmoji;
-
-/// Lexer 结果类型
-pub type LexResult<T> = Result<T, Diagnostic>;
 
 #[derive(Debug)]
 pub struct Lexer<'src> {
@@ -69,7 +65,7 @@ impl<'src> Lexer<'src> {
     }
 
     fn source_file(&self) -> Ref<'_, SourceFile> {
-        Ref::map(self.session.source_map.borrow(), |sm| {
+        Ref::map(self.session.source_map(), |sm| {
             sm.file(self.file_id).unwrap()
         })
     }
@@ -111,15 +107,15 @@ impl<'src> Lexer<'src> {
 
     fn make_span(&self) -> Span {
         Span {
-            start: self
+            lo: self
                 .source_file()
                 .location_from_offset(self.current_token_start),
-            end: self.source_file().location_from_offset(self.position),
+            hi: self.source_file().location_from_offset(self.position),
             file: self.file_id,
         }
     }
 
-    pub fn advance_token(&mut self) -> LexResult<Token> {
+    pub fn advance_token(&mut self) -> PResult<Token> {
         // 跳过空白字符
         self.skip_whitespace();
 
@@ -223,12 +219,16 @@ impl<'src> Lexer<'src> {
 
             c if !c.is_ascii() && c.is_emoji_char() => {
                 let span = self.make_span();
-                return Err(error(format!("非法字符 `{}`", c)).with_span(span).build());
+                return Err(self
+                    .session
+                    .report_err(error(format!("非法字符 `{}`", c)).with_span(span)));
             }
 
             c => {
                 let span = self.make_span();
-                return Err(error(format!("非法字符 `{}`", c)).with_span(span).build());
+                return Err(self
+                    .session
+                    .report_err(error(format!("非法字符 `{}`", c)).with_span(span)));
             }
         };
 
@@ -288,7 +288,7 @@ impl<'src> Lexer<'src> {
                 self.advance(1); // 消费 '='
                 PlusEq
             }
-            _ => Add,
+            _ => Plus,
         }
     }
 
@@ -436,13 +436,15 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn lex_char(&mut self) -> LexResult<TokenKind> {
+    fn lex_char(&mut self) -> PResult<TokenKind> {
         self.advance(1); // 消费开头的单引号
         let terminated = self.parse_single_quoted_string();
 
         if !terminated {
             let span: Span = self.make_span();
-            return Err(error("未关闭的字符字面量").with_span(span).build());
+            return Err(self
+                .session
+                .report_err(error("未关闭的字符字面量").with_span(span)));
         }
 
         // 检查是否有后缀
@@ -458,13 +460,15 @@ impl<'src> Lexer<'src> {
         Ok(Literal { kind: Char, suffix })
     }
 
-    fn lex_string(&mut self) -> LexResult<TokenKind> {
+    fn lex_string(&mut self) -> PResult<TokenKind> {
         self.advance(1); // 消费开头的双引号
         let terminated = self.parse_double_quoted_string();
 
         if !terminated {
             let span = self.make_span();
-            return Err(error("未闭合的字符串").with_span(span).build());
+            return Err(self
+                .session
+                .report_err(error("未闭合的字符串").with_span(span)));
         }
 
         // 检查是否有后缀
@@ -527,7 +531,7 @@ impl<'src> Lexer<'src> {
         false
     }
 
-    fn lex_number(&mut self, first_digit: char) -> LexResult<TokenKind> {
+    fn lex_number(&mut self, first_digit: char) -> PResult<TokenKind> {
         let mut empty_int = false;
 
         // 消费第一个数字
@@ -568,13 +572,9 @@ impl<'src> Lexer<'src> {
             // 检查是否是范围运算符 (如 1..2)
             if next_char == Some('.') {
                 // 这是范围运算符，不是小数点，所以不处理
-            }
-            // 检查是否是方法调用 (如 1.foo())
-            else if next_char.map_or(false, |c| c.is_alphabetic() || c == '_') {
+            } else if next_char.map_or(false, |c| c.is_alphabetic() || c == '_') {
                 // 这是方法调用，不是小数点，所以不处理
-            }
-            // 正常的小数点
-            else if next_char != Some('.') && !next_char.map_or(false, is_id_start) {
+            } else if next_char != Some('.') && !next_char.map_or(false, is_id_start) {
                 self.advance(1); // 消费小数点
                 is_float = true;
 
@@ -599,12 +599,16 @@ impl<'src> Lexer<'src> {
         // 检查错误情况
         if !is_float && empty_int {
             let span = self.make_span();
-            return Err(error("未关闭的整数").with_span(span).build());
+            return Err(self
+                .session
+                .report_err(error("未关闭的整数").with_span(span)));
         }
 
         if is_float && empty_exponent {
             let span = self.make_span();
-            return Err(error("未关闭的浮点数").with_span(span).build());
+            return Err(self
+                .session
+                .report_err(error("未关闭的浮点数").with_span(span)));
         }
 
         // 解析后缀
@@ -688,7 +692,6 @@ impl<'src> Lexer<'src> {
             "as" => As,
             "extern" => Extern,
             "mut" => Mut,
-            "const" => Const,
             "mod" => Mod,
             "super" => Super,
             "crate" => Crate,
@@ -697,6 +700,9 @@ impl<'src> Lexer<'src> {
             "trait" => Trait,
             "type" => Type,
             "impl" => Impl,
+            "match" => Match,
+            "defer" => Defer,
+            "enum" => Enum,
             _ => Ident,
         }
     }

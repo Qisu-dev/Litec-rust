@@ -1,6 +1,13 @@
 use litec_ast::{
     ast::*,
-    mut_visit::{MutVisitor, walk_mut_block, walk_mut_crate, walk_mut_expr, walk_mut_extern, walk_mut_extern_item, walk_mut_field, walk_mut_fn, walk_mut_generic_param, walk_mut_generic_params, walk_mut_impl, walk_mut_impl_item, walk_mut_item, walk_mut_param, walk_mut_path, walk_mut_path_segment, walk_mut_stmt, walk_mut_struct_expr, walk_mut_struct_expr_field, walk_mut_ty, walk_mut_type_alias, walk_mut_use_tree},
+    mut_visit::{
+        MutVisitor, walk_mut_arm, walk_mut_block, walk_mut_bounds, walk_mut_crate, walk_mut_expr,
+        walk_mut_extern, walk_mut_extern_item, walk_mut_field, walk_mut_fn, walk_mut_generic_param,
+        walk_mut_generic_params, walk_mut_impl, walk_mut_impl_item, walk_mut_item, walk_mut_param,
+        walk_mut_pat, walk_mut_path, walk_mut_path_segment, walk_mut_stmt, walk_mut_struct_expr,
+        walk_mut_struct_expr_field, walk_mut_struct_field_pat, walk_mut_trait_item, walk_mut_ty,
+        walk_mut_type_alias, walk_mut_use_tree, walk_mut_variant, walk_mut_variant_field,
+    },
 };
 
 pub struct NodeCollector {
@@ -73,14 +80,14 @@ impl MutVisitor for NodeCollector {
         walk_mut_fn(self, func);
     }
 
-    fn visit_generic_param(&mut self, param: &mut GenericParam) {
+    fn visit_generic_param(&mut self, param: &mut Generic) {
         let id = self.alloc_id();
         param.node_id = id;
 
         walk_mut_generic_param(self, param);
     }
 
-    fn visit_generic_params(&mut self, generics: &mut GenericParams) {
+    fn visit_generic_params(&mut self, generics: &mut Generics) {
         let id = self.alloc_id();
         generics.node_id = id;
 
@@ -97,7 +104,7 @@ impl MutVisitor for NodeCollector {
     fn visit_param(&mut self, param: &mut Param) {
         let id = self.alloc_id();
         param.node_id = id;
-        
+
         walk_mut_param(self, param);
     }
 
@@ -150,10 +157,10 @@ impl MutVisitor for NodeCollector {
     fn visit_impl(&mut self, impl_: &mut Impl) {
         let id = self.alloc_id();
         impl_.node_id = id;
-        
+
         walk_mut_impl(self, impl_);
     }
-    
+
     fn visit_impl_item(&mut self, impl_item: &mut ImplItem) {
         let id = self.alloc_id();
         impl_item.node_id = id;
@@ -166,5 +173,54 @@ impl MutVisitor for NodeCollector {
         type_alias.node_id = id;
 
         walk_mut_type_alias(self, type_alias);
+    }
+
+    fn visit_bounds(&mut self, bounds: &mut Bounds) {
+        let id = self.alloc_id();
+        bounds.node_id = id;
+
+        walk_mut_bounds(self, bounds);
+    }
+
+    fn visit_trait_item(&mut self, trait_item: &mut TraitItem) {
+        let id = self.alloc_id();
+        trait_item.node_id = id;
+
+        walk_mut_trait_item(self, trait_item);
+    }
+
+    fn visit_arm(&mut self, arm: &mut Arm) {
+        let id = self.alloc_id();
+        arm.node_id = id;
+
+        walk_mut_arm(self, arm);
+    }
+
+    fn visit_pat(&mut self, pat: &mut Pat) {
+        let id = self.alloc_id();
+        pat.node_id = id;
+
+        walk_mut_pat(self, pat);
+    }
+
+    fn visit_struct_field_pat(&mut self, struct_field_pat: &mut StructFieldPat) {
+        let id = self.alloc_id();
+        struct_field_pat.node_id = id;
+
+        walk_mut_struct_field_pat(self, struct_field_pat);
+    }
+
+    fn visit_variant(&mut self, variant: &mut Variant) {
+        let id = self.alloc_id();
+        variant.node_id = id;
+
+        walk_mut_variant(self, variant);
+    }
+
+    fn visit_variant_field(&mut self, variant_field: &mut VariantField) {
+        let id = self.alloc_id();
+        variant_field.node_id = id;
+
+        walk_mut_variant_field(self, variant_field);
     }
 }

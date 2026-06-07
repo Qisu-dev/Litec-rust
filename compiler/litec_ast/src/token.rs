@@ -93,7 +93,7 @@ pub enum TokenKind {
     /// `||`
     Or,
     /// `+`
-    Add,
+    Plus,
     /// `++`
     PlusPlus,
     /// `+=`
@@ -153,7 +153,6 @@ pub enum TokenKind {
     As,
     Extern,
     Mut,
-    Const,
     Mod,
     Super,
     Crate,
@@ -165,6 +164,9 @@ pub enum TokenKind {
     Type,
     Impl,
     For,
+    Match,
+    Defer,
+    Enum,
 
     Error,
     Eof,

@@ -1,14 +1,13 @@
-use std::path::PathBuf;
-
 use litec_ast::{
     ast::{
         Attr, Block, DUMMY_NODE_ID, Extern, ExternItem, ExternItemKind, Field, Fn, FnRetTy, FnSig,
-        Ident, Impl, ImplItem, ImplItemKind, Inline, Item, ItemKind, Param, StmtKind, Ty, TyKind,
-        TypeAlias, UseTree, UseTreeKind, Visibility,
+        Generics, Ident, Impl, ImplItem, ImplItemKind, Inline, Item, ItemKind, Mutability, Param,
+        ParamKind, StructKind, TraitItem, TraitItemKind, TypeAlias, UseTree, UseTreeKind, Variant,
+        VariantData, VariantField, Visibility,
     },
     token::TokenKind,
 };
-use litec_error::error;
+use litec_error::{PResult, error};
 use litec_span::intern_global;
 
 use crate::parser::{Parser, parse, path::PathStyle};
@@ -33,7 +32,7 @@ impl FnContext {
     };
 
     /// extern "ABI" fn foo() { } 形式的函数
-    pub const EXTERN_FN: Self = Self {
+    pub const _EXTERN_FN: Self = Self {
         allow_variadic: false,
         allow_generics: true,
     };
@@ -45,8 +44,8 @@ impl FnContext {
 }
 
 impl<'a> Parser<'a> {
-    fn parse_item_common(&mut self) -> Option<(Option<Attr>, Visibility)> {
-        let attr = self.parse_attribute();
+    fn parse_item_common(&mut self) -> PResult<(Option<Attr>, Visibility)> {
+        let attr = self.parse_attribute()?;
         let vis = if self.eat(TokenKind::Pub) {
             Visibility::Public
         } else if self.eat(TokenKind::Priv) {
@@ -54,10 +53,10 @@ impl<'a> Parser<'a> {
         } else {
             Visibility::Inherited
         };
-        Some((attr, vis))
+        Ok((attr, vis))
     }
 
-    pub(super) fn parse_item(&mut self) -> Option<Item> {
+    pub(super) fn parse_item(&mut self) -> PResult<Item> {
         let span = self.current_token.span;
         let (attr, vis) = self.parse_item_common()?;
 
@@ -67,22 +66,18 @@ impl<'a> Parser<'a> {
             TokenKind::Use => self.parse_use_item()?,
             TokenKind::Mod => self.parse_module_item()?,
             TokenKind::Extern => self.parse_extern()?,
-            TokenKind::Type => self.parse_type_alias()?,
+            TokenKind::Type => ItemKind::TypeAlias(self.parse_type_alias()?),
             TokenKind::Impl => self.parse_impl()?,
             TokenKind::Trait => self.parse_trait()?,
+            TokenKind::Enum => self.parse_enum()?,
             _ => {
-                self.error(
-                    error("期待一个`item`")
-                        .with_span(self.current_token.span)
-                        .build(),
-                );
-                return None;
+                return Err(self.error(error("期待一个`item`").with_span(self.current_token.span)));
             }
         };
 
         let span = span.extend_to(self.last_token_end_span);
 
-        Some(Item {
+        Ok(Item {
             attr,
             node_id: DUMMY_NODE_ID,
             visibility: vis,
@@ -91,7 +86,147 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_extern(&mut self) -> Option<ItemKind> {
+    fn parse_enum(&mut self) -> PResult<ItemKind> {
+        self.advance();
+
+        let ident = self.parse_ident()?;
+
+        let generics = self.parse_generics()?;
+
+        self.expect(TokenKind::OpenBrace, self.span_error("期待 `{`"))?;
+
+        let mut variants = Vec::new();
+
+        while self.current_token.kind != TokenKind::Eof
+            && self.current_token.kind != TokenKind::CloseBrace
+        {
+            variants.push(self.parse_variant()?);
+            self.eat(TokenKind::Comma);
+        }
+
+        self.expect(TokenKind::CloseBrace, self.span_error("期待 `}`"))?;
+
+        Ok(ItemKind::Enum(ident, generics, variants))
+    }
+
+    fn parse_struct_kind(&mut self) -> PResult<StructKind> {
+        match self.current_token.kind {
+            TokenKind::Semi => {
+                self.advance();
+
+                Ok(StructKind::Unit)
+            }
+            TokenKind::OpenParen => {
+                self.advance();
+
+                let mut tys = Vec::new();
+
+                while self.current_token.kind != TokenKind::Eof
+                    && self.current_token.kind != TokenKind::CloseParen
+                {
+                    tys.push(self.parse_ty()?);
+                    self.eat(TokenKind::Comma);
+                }
+
+                self.expect(TokenKind::CloseParen, self.span_error("期待 `)`"))?;
+
+                self.expect(TokenKind::Semi, self.span_error("期待 `;`"))?;
+
+                Ok(StructKind::Tuple(tys))
+            }
+            TokenKind::OpenBrace => {
+                self.advance();
+
+                let mut fields = Vec::new();
+                while self.current_token.kind != TokenKind::Eof
+                    && self.current_token.kind != TokenKind::CloseBrace
+                {
+                    fields.push(self.parse_field()?);
+                    self.eat(TokenKind::Comma);
+                }
+
+                self.expect(TokenKind::CloseBrace, self.span_error("期待 `}`"))?;
+
+                Ok(StructKind::Struct(fields))
+            }
+            _ => Err(self.error(self.span_error("未知内容"))),
+        }
+    }
+
+    fn parse_variant(&mut self) -> PResult<Variant> {
+        let ident = self.parse_ident()?;
+
+        if self.eat(TokenKind::OpenParen) {
+            let mut types = Vec::new();
+
+            while self.current_token.kind != TokenKind::Eof
+                && self.current_token.kind != TokenKind::CloseParen
+            {
+                types.push(self.parse_ty()?);
+                self.eat(TokenKind::Comma);
+            }
+
+            let span = self
+                .expect(TokenKind::CloseParen, self.span_error("期待 `)`"))?
+                .span;
+            let span = ident.span.extend_to(span);
+            Ok(Variant {
+                ident,
+                data: VariantData::Tuple(types),
+                span,
+                node_id: DUMMY_NODE_ID,
+            })
+        } else if self.eat(TokenKind::OpenBrace) {
+            let mut fields = Vec::new();
+
+            while self.current_token.kind != TokenKind::Eof
+                && self.current_token.kind != TokenKind::CloseBrace
+            {
+                fields.push(self.parse_variant_field()?);
+                self.eat(TokenKind::Comma);
+            }
+
+            let span = self
+                .expect(TokenKind::CloseBrace, self.span_error("期待 `}`"))?
+                .span;
+
+            let span = ident.span.extend_to(span);
+
+            Ok(Variant {
+                ident,
+                data: VariantData::Struct(fields),
+                span,
+                node_id: DUMMY_NODE_ID,
+            })
+        } else {
+            let span = ident.span;
+            Ok(Variant {
+                ident,
+                data: VariantData::Unit,
+                span,
+                node_id: DUMMY_NODE_ID,
+            })
+        }
+    }
+
+    fn parse_variant_field(&mut self) -> PResult<VariantField> {
+        let ident = self.parse_ident()?;
+
+        self.expect(TokenKind::Colon, self.span_error("期待 `:`"))?;
+
+        let ty = self.parse_ty()?;
+
+        let span = ident.span.extend_to(ty.span);
+
+        Ok(VariantField {
+            name: ident,
+            ty,
+            span,
+            node_id: DUMMY_NODE_ID,
+        })
+    }
+
+    fn parse_extern(&mut self) -> PResult<ItemKind> {
         self.advance(); // 消耗 `extern`
 
         // 解析 ABI 类型（可选）
@@ -106,12 +241,7 @@ impl<'a> Parser<'a> {
             })
         } else {
             if !self.check(TokenKind::OpenBrace) {
-                self.error(
-                    error("期待ABI类型")
-                        .with_span(self.current_token.span)
-                        .build(),
-                );
-                return None;
+                return Err(self.error(error("期待ABI类型").with_span(self.current_token.span)));
             }
             None
         };
@@ -119,7 +249,7 @@ impl<'a> Parser<'a> {
         // 期待开大括号
         self.expect(
             TokenKind::OpenBrace,
-            error("期待 `{`").with_span(self.current_token.span).build(),
+            error("期待 `{`").with_span(self.current_token.span),
         )?;
 
         // 解析外部函数列表
@@ -133,54 +263,98 @@ impl<'a> Parser<'a> {
         // 期待闭大括号
         self.expect(
             TokenKind::CloseBrace,
-            error("期待 `}`").with_span(self.current_token.span).build(),
+            error("期待 `}`").with_span(self.current_token.span),
         )?;
 
-        Some(ItemKind::Extern(Extern {
+        Ok(ItemKind::Extern(Extern {
             node_id: DUMMY_NODE_ID,
             abi: abi,
             items: items,
         }))
     }
 
-    fn parse_type_alias(&mut self) -> Option<ItemKind> {
+    fn parse_type_alias(&mut self) -> PResult<TypeAlias> {
         self.advance(); // 度过type
         let ident = self.parse_ident()?;
-        let generics = self.parse_generic_params()?;
+        let generics = self.parse_generics()?;
         self.expect(
             TokenKind::Assign,
-            error("期待 `=`").with_span(self.current_token.span).build(),
+            error("期待 `=`").with_span(self.current_token.span),
         )?;
-        let ty = self.parse_type()?;
-        self.expect(TokenKind::Semi, self.expect_semi_error().build())?;
+        let ty = self.parse_ty()?;
+        self.expect(TokenKind::Semi, self.expect_semi_error())?;
 
-        Some(ItemKind::TypeAlias(TypeAlias {
+        Ok(TypeAlias {
             node_id: DUMMY_NODE_ID,
-            ident,
+            name: ident,
             generics,
             ty,
-        }))
+        })
     }
 
-    fn parse_trait(&mut self) -> Option<ItemKind> {
+    fn parse_trait(&mut self) -> PResult<ItemKind> {
         self.advance(); // 度过 trait
 
         let name = self.parse_ident()?;
 
-        todo!();
+        let generics = self.parse_generics()?;
+
+        self.expect(TokenKind::OpenBrace, self.span_error("期待 `{`"))?;
+
+        let mut items = Vec::new();
+
+        while self.current_token.kind != TokenKind::CloseBrace
+            && self.current_token.kind != TokenKind::Eof
+        {
+            items.push(self.parse_trait_item()?);
+        }
+
+        self.expect(TokenKind::CloseBrace, self.span_error("期待 `}`"))?;
+
+        Ok(ItemKind::Trait(name, generics, items))
     }
 
-    fn parse_impl(&mut self) -> Option<ItemKind> {
+    fn parse_trait_item(&mut self) -> PResult<TraitItem> {
+        let span = self.current_token.span;
+        let (attr, vis) = self.parse_item_common()?;
+        let kind = match self.current_token.kind {
+            TokenKind::Fn => {
+                let sig = self.parse_fn_sig(FnContext::TRAIT_FN)?;
+                self.expect(TokenKind::Semi, self.span_error("期待 `;`"))?;
+                TraitItemKind::Fn(sig)
+            }
+            TokenKind::Type => {
+                let type_alias = self.parse_type_alias()?;
+                self.expect(TokenKind::Semi, self.span_error("期待 `;`"))?;
+                TraitItemKind::Type(type_alias)
+            }
+            _ => {
+                return Err(self.error(self.span_error("未知 token")));
+            }
+        };
+
+        let span = span.extend_to(self.last_token_end_span);
+
+        Ok(TraitItem {
+            node_id: DUMMY_NODE_ID,
+            attr: attr,
+            kind: kind,
+            span: span,
+            visibility: vis,
+        })
+    }
+
+    fn parse_impl(&mut self) -> PResult<ItemKind> {
         self.advance(); // 度过impl
-        let generics = self.parse_generic_params()?;
+        let generics = self.parse_generics()?;
         let snapshot = self.snapshot();
 
-        let ty = self.parse_type()?;
+        let ty = self.parse_ty()?;
         let (of_trait, self_ty) = if self.eat(TokenKind::For) {
             self.restore(snapshot);
             let of_trait = self.parse_path(PathStyle::Type)?;
             self.eat(TokenKind::For);
-            let self_ty = self.parse_type()?;
+            let self_ty = self.parse_ty()?;
             (Some(of_trait), self_ty)
         } else {
             (None, ty)
@@ -188,7 +362,7 @@ impl<'a> Parser<'a> {
 
         self.expect(
             TokenKind::OpenBrace,
-            error("期待 `{`").with_span(self.current_token.span).build(),
+            error("期待 `{`").with_span(self.current_token.span),
         )?;
 
         let mut items = Vec::new();
@@ -202,12 +376,9 @@ impl<'a> Parser<'a> {
                 items.push(impl_item);
             } else {
                 if let ImplItemKind::Type(_) = impl_item.kind {
-                    self.error(
-                        error("在固定实现内不可以有类型别名")
-                            .with_span(impl_item.span)
-                            .build(),
+                    return Err(
+                        self.error(error("在固定实现内不可以有类型别名").with_span(impl_item.span))
                     );
-                    return None;
                 }
                 items.push(impl_item);
             }
@@ -215,10 +386,10 @@ impl<'a> Parser<'a> {
 
         self.expect(
             TokenKind::CloseBrace,
-            error("期待 `}`").with_span(self.current_token.span).build(),
+            error("期待 `}`").with_span(self.current_token.span),
         )?;
 
-        Some(ItemKind::Impl(Impl {
+        Ok(ItemKind::Impl(Impl {
             node_id: DUMMY_NODE_ID,
             generics,
             of_trait,
@@ -227,21 +398,16 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_impl_item(&mut self) -> Option<ImplItem> {
+    fn parse_impl_item(&mut self) -> PResult<ImplItem> {
         let item = self.parse_item()?;
         let impl_kind = match item.kind {
             ItemKind::Fn(fn_) => ImplItemKind::Fn(fn_),
             ItemKind::TypeAlias(type_alias) => ImplItemKind::Type(type_alias),
             _ => {
-                self.error(
-                    error("impl内部仅能有函数与类型别名")
-                        .with_span(item.span)
-                        .build(),
-                );
-                return None;
+                return Err(self.error(error("impl内部仅能有函数与类型别名").with_span(item.span)));
             }
         };
-        Some(ImplItem {
+        Ok(ImplItem {
             node_id: DUMMY_NODE_ID,
             attr: item.attr,
             visibility: item.visibility,
@@ -250,14 +416,14 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_extern_item(&mut self) -> Option<ExternItem> {
+    fn parse_extern_item(&mut self) -> PResult<ExternItem> {
         let span = self.current_token.span;
         let (attr, vis) = self.parse_item_common()?;
 
         let kind = match self.current_token.kind {
             TokenKind::Fn => {
                 let sig = self.parse_fn_sig(FnContext::EXTERN_ITEM)?;
-                self.expect(TokenKind::Semi, self.expect_semi_error().build())?;
+                self.expect(TokenKind::Semi, self.expect_semi_error())?;
                 ExternItemKind::Fn(Fn {
                     node_id: DUMMY_NODE_ID,
                     sig,
@@ -265,17 +431,14 @@ impl<'a> Parser<'a> {
                 })
             }
             _ => {
-                self.error(
-                    error("期待一个`extern item`")
-                        .with_span(self.current_token.span)
-                        .build(),
+                return Err(
+                    self.error(error("期待一个`extern item`").with_span(self.current_token.span))
                 );
-                return None;
             }
         };
         let span = span.extend_to(self.last_token_end_span);
 
-        Some(ExternItem {
+        Ok(ExternItem {
             attr,
             node_id: DUMMY_NODE_ID,
             visibility: vis,
@@ -284,7 +447,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_module_item(&mut self) -> Option<ItemKind> {
+    fn parse_module_item(&mut self) -> PResult<ItemKind> {
         // 消耗 `mod`
         self.advance();
 
@@ -292,10 +455,10 @@ impl<'a> Parser<'a> {
 
         let inline = self.parse_module_inline(name)?;
 
-        Some(ItemKind::Module(name, inline))
+        Ok(ItemKind::Module(name, inline))
     }
 
-    fn parse_module_inline(&mut self, module_name: Ident) -> Option<Inline> {
+    fn parse_module_inline(&mut self, module_name: Ident) -> PResult<Inline> {
         if self.eat(TokenKind::OpenBrace) {
             let mut items = Vec::new();
             loop {
@@ -306,42 +469,40 @@ impl<'a> Parser<'a> {
                     items.push(self.parse_item()?);
                 }
             }
-            Some(Inline::Inline(items))
+            Ok(Inline::Inline(items))
         } else {
             let current_file = self
                 .session
-                .source_map
-                .borrow()
-                .file(self.file_id)?
+                .mut_source_map()
+                .file(self.file_id)
+                .unwrap()
                 .path
                 .clone();
-            let dir = current_file.parent()?;
+            let dir = current_file.parent().ok_or(
+                self.error(error("当前文件没有父文件").with_span(self.current_token.span)),
+            )?;
             let path = dir.join(format!("{}.lt", module_name.text.to_string()));
 
             if path.exists() {
-                self.error(
+                return Err(self.error(
                     error(format!("不存在的文件 `{}`", module_name.text.to_string()))
-                        .with_span(module_name.span)
-                        .into(),
-                );
-                return None;
+                        .with_span(module_name.span),
+                ));
             }
 
-            let file_id = match self.session.borrow_source_map().path_to_id(&path) {
+            let file_id = match self.session.source_map().path_to_id(&path) {
                 Some(file_id) => *file_id,
                 None => {
                     let context = match std::fs::read_to_string(path.clone()) {
                         Ok(context) => context,
                         Err(err) => {
-                            self.error(
+                            return Err(self.error(
                                 error(format!("读取文件错误 `{}`", err.to_string()))
-                                    .with_span(module_name.span)
-                                    .build(),
-                            );
-                            return None;
+                                    .with_span(module_name.span),
+                            ));
                         }
                     };
-                    self.session.source_map.borrow_mut().add_file(
+                    self.session.mut_source_map().add_file(
                         path.file_name().unwrap().to_string_lossy().to_string(),
                         context,
                         &path,
@@ -351,21 +512,21 @@ impl<'a> Parser<'a> {
 
             let krate = parse(self.session, file_id);
 
-            Some(Inline::External(krate.items))
+            Ok(Inline::External(krate.items))
         }
     }
 
-    fn parse_use_item(&mut self) -> Option<ItemKind> {
+    fn parse_use_item(&mut self) -> PResult<ItemKind> {
         self.advance(); // 消耗 `use`
 
         let use_tree = self.parse_use_tree()?;
 
-        self.expect(TokenKind::Semi, self.expect_semi_error().build())?;
+        self.expect(TokenKind::Semi, self.expect_semi_error())?;
 
-        Some(ItemKind::Use(use_tree))
+        Ok(ItemKind::Use(use_tree))
     }
 
-    fn parse_use_tree(&mut self) -> Option<UseTree> {
+    fn parse_use_tree(&mut self) -> PResult<UseTree> {
         let start_span = self.current_token.span;
         let prefix = self.parse_path(PathStyle::Mod)?;
 
@@ -386,7 +547,7 @@ impl<'a> Parser<'a> {
             let close_brace_span = self
                 .expect(
                     TokenKind::CloseBrace,
-                    error("期待 `}`").with_span(self.current_token.span).build(),
+                    error("期待 `}`").with_span(self.current_token.span),
                 )?
                 .span
                 .extend_to(start_span);
@@ -394,16 +555,10 @@ impl<'a> Parser<'a> {
                 UseTreeKind::Nested(items, close_brace_span),
                 start_span.extend_to(close_brace_span),
             )
-        } else if self.current_token.kind == TokenKind::PathAccess {
+        } else if self.eat(TokenKind::As) {
             let ident = self.parse_ident()?;
-            let (rename, span) = if self.eat(TokenKind::As) {
-                let rename = self.parse_ident()?;
-                let span = start_span.extend_to(rename.span);
-                (Some(rename), span)
-            } else {
-                (None, start_span.extend_to(ident.span))
-            };
-            (UseTreeKind::Simple(rename), span)
+            let span = start_span.extend_to(ident.span);
+            (UseTreeKind::Simple(Some(ident)), span)
         } else if self.current_token.kind == TokenKind::Mul {
             let span = start_span.extend_to(self.current_token.span);
             self.advance();
@@ -412,7 +567,7 @@ impl<'a> Parser<'a> {
             (UseTreeKind::Simple(None), start_span.extend_to(prefix.span))
         };
 
-        Some(UseTree {
+        Ok(UseTree {
             node_id: DUMMY_NODE_ID,
             prefix,
             kind: use_tree_kind,
@@ -420,39 +575,19 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_struct_item(&mut self) -> Option<ItemKind> {
+    fn parse_struct_item(&mut self) -> PResult<ItemKind> {
         self.advance();
 
         let name = self.parse_ident()?;
-        let generics = self.parse_generic_params()?;
 
-        self.expect(
-            TokenKind::OpenBrace,
-            error("期待大括号")
-                .with_span(self.current_token.span)
-                .build(),
-        )?;
+        let generics = self.parse_generics()?;
 
-        let mut fields = Vec::new();
-        let mut index = 0;
-        while self.current_token.kind != TokenKind::CloseBrace
-            && self.current_token.kind != TokenKind::Eof
-        {
-            fields.push(self.parse_field(index)?);
+        let struct_kind = self.parse_struct_kind()?;
 
-            self.eat(TokenKind::Comma);
-            index += 1;
-        }
-
-        self.expect(
-            TokenKind::CloseBrace,
-            error("期待 `}`").with_span(self.current_token.span).build(),
-        )?;
-
-        Some(ItemKind::Struct(name, generics, fields))
+        Ok(ItemKind::Struct(name, generics, struct_kind))
     }
 
-    fn parse_field(&mut self, index: u32) -> Option<Field> {
+    fn parse_field(&mut self) -> PResult<Field> {
         let span = self.current_token.span;
         let vis = match self.current_token.kind {
             TokenKind::Pub => {
@@ -470,47 +605,78 @@ impl<'a> Parser<'a> {
 
         self.expect(
             TokenKind::Colon,
-            error("期待 `:`").with_span(self.current_token.span).build(),
+            error("期待 `:`").with_span(self.current_token.span),
         )?;
 
-        let ty = self.parse_type()?;
+        let ty = self.parse_ty()?;
         let span = span.extend_to(ty.span);
 
-        Some(Field {
+        Ok(Field {
             node_id: DUMMY_NODE_ID,
             name: name,
             ty: ty,
             visibility: vis,
-            index: index,
             span: span,
         })
     }
 
-    fn parse_fn_item(&mut self) -> Option<ItemKind> {
+    fn parse_fn_item(&mut self) -> PResult<ItemKind> {
         let sig = self.parse_fn_sig(FnContext::FREE)?;
 
         let block = self.parse_block()?;
 
-        Some(ItemKind::Fn(Fn {
+        Ok(ItemKind::Fn(Fn {
             node_id: DUMMY_NODE_ID,
             sig: sig,
             body: Some(block),
         }))
     }
 
-    fn parse_param(&mut self) -> Option<Param> {
-        let name = self.parse_ident()?;
-        self.expect(
-            TokenKind::Colon,
-            error("期待 `:`").with_span(self.current_token.span).build(),
-        )?;
-        let ty = self.parse_type()?;
-        let span = name.span.extend_to(ty.span);
+    fn parse_param(&mut self) -> PResult<Param> {
+        let start = self.current_token.span;
+        if self.eat(TokenKind::Mul) {
+            let mutability = if self.eat(TokenKind::Mut) {
+                Mutability::Mutable
+            } else {
+                Mutability::Immutable
+            };
 
-        Some(Param {
+            let self_ = self.expect(TokenKind::SelfLower, self.span_error("期待 `self`"))?;
+            let span = start.extend_to(self_.span);
+
+            return Ok(Param {
+                node_id: DUMMY_NODE_ID,
+                kind: ParamKind::SelfPtr(mutability),
+                span: span,
+            });
+        }
+
+        if self.eat(TokenKind::SelfLower) {
+            let span = start.extend_to(self.last_token_end_span);
+            return Ok(Param {
+                node_id: DUMMY_NODE_ID,
+                kind: ParamKind::SelfValue(Mutability::Immutable),
+                span,
+            });
+        } else if self.check(TokenKind::Mut)
+            && self.look_ahead(1, |token| token.kind == TokenKind::SelfLower)
+        {
+            self.advance();
+            let span = start.extend_to(self.current_token.span);
+            self.advance();
+            return Ok(Param {
+                node_id: DUMMY_NODE_ID,
+                kind: ParamKind::SelfValue(Mutability::Mutable),
+                span,
+            });
+        }
+        let pat = self.parse_pat()?;
+        self.expect(TokenKind::Colon, self.span_error("expected `:`"))?;
+        let ty = self.parse_ty()?;
+        let span = start.extend_to(ty.span);
+        Ok(Param {
             node_id: DUMMY_NODE_ID,
-            name: name,
-            ty,
+            kind: ParamKind::Normal(pat, ty),
             span: span,
         })
     }
@@ -519,24 +685,25 @@ impl<'a> Parser<'a> {
     /// fn foo() -> i32 { ... }
     /// ^             ^
     ///            结束的地方
-    fn parse_fn_sig(&mut self, ctxt: FnContext) -> Option<FnSig> {
+    fn parse_fn_sig(&mut self, ctxt: FnContext) -> PResult<FnSig> {
         self.advance(); // 消耗 `fn`
         let name = self.parse_ident()?;
 
         let generics = if ctxt.allow_generics {
-            self.parse_generic_params()?
+            self.parse_generics()? // 解析可能存在的泛型参数，如果没有则返回空
         } else {
-            self.error(
-                error("不允许此处使用泛型")
-                    .with_span(self.current_token.span)
-                    .build(),
-            );
-            return None;
+            // 不允许泛型：检查是否出现了 `<`
+            if self.current_token.kind == TokenKind::Lt {
+                return Err(
+                    self.error(error("不允许此处使用泛型").with_span(self.current_token.span))
+                );
+            }
+            Generics::empty()
         };
 
         self.expect(
             TokenKind::OpenParen,
-            error("期待 `(`").with_span(self.current_token.span).build(),
+            error("期待 `(`").with_span(self.current_token.span),
         )?;
 
         let mut params = Vec::new();
@@ -547,12 +714,9 @@ impl<'a> Parser<'a> {
                     self.advance();
                     break true;
                 } else {
-                    self.error(
-                        error("不允许此处使用可变参数")
-                            .with_span(self.current_token.span)
-                            .build(),
-                    );
-                    return None;
+                    return Err(self.error(
+                        error("不允许此处使用可变参数").with_span(self.current_token.span),
+                    ));
                 }
             }
             if self.check(TokenKind::CloseParen) {
@@ -566,15 +730,15 @@ impl<'a> Parser<'a> {
 
         self.expect(
             TokenKind::CloseParen,
-            error("期待 `)`").with_span(self.current_token.span).build(),
+            error("期待 `)`").with_span(self.current_token.span),
         )?;
 
         let return_ty = if self.eat(TokenKind::Arrow) {
-            FnRetTy::Ty(self.parse_type()?)
+            FnRetTy::Ty(self.parse_ty()?)
         } else {
             FnRetTy::Default(self.current_token.span)
         };
-        Some(FnSig {
+        Ok(FnSig {
             generics: generics,
             name,
             params,
@@ -583,17 +747,16 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(super) fn parse_block(&mut self) -> Option<Block> {
+    pub(super) fn parse_block(&mut self) -> PResult<Block> {
         // 期待开大括号 - 如果失败直接返回，因为这是块的基本结构
         let open_brace = self
             .expect(
                 TokenKind::OpenBrace,
-                error("期待 `{`").with_span(self.current_token.span).build(),
+                error("期待 `{`").with_span(self.current_token.span),
             )?
             .span;
 
         let mut statements = Vec::new();
-        let mut tail = None;
 
         // 解析块内容，容忍错误并继续
         while self.current_token.kind != TokenKind::CloseBrace
@@ -601,38 +764,14 @@ impl<'a> Parser<'a> {
         {
             let stmt_start = self.current_token.span;
 
-            // 尝试解析语句，如果失败则记录错误并恢复
-            if let Some(stmt) = self.parse_stmt() {
-                // 检查是否是尾表达式
-                if self.current_token.kind == TokenKind::Semi {
-                    self.advance(); // 消耗分号
-                    statements.push(stmt);
-                    continue;
-                }
-                if self.current_token.kind == TokenKind::CloseBrace {
-                    match stmt.kind {
-                        StmtKind::Expr(expr) => {
-                            tail = Some(expr);
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                self.error(
-                    error(format!("未添加分号"))
-                        .with_span(self.current_token.span)
-                        .build(),
-                );
+            if let Ok(stmt) = self.parse_stmt() {
+                statements.push(stmt);
+            } else {
+                self.sync_to_stmt();
             }
 
-            // 防止无限循环：如果解析失败但位置没变，强制前进
             if self.current_token.span == stmt_start {
                 self.advance();
-            }
-
-            // 额外安全检查
-            if self.current_token.kind == TokenKind::Eof {
-                break;
             }
         }
 
@@ -640,26 +779,25 @@ impl<'a> Parser<'a> {
         let close_span = self
             .expect(
                 TokenKind::CloseBrace,
-                error("期待 `}`").with_span(self.current_token.span).build(),
+                error("期待 `}`").with_span(self.current_token.span),
             )?
             .span;
 
-        Some(Block {
+        Ok(Block {
             node_id: DUMMY_NODE_ID,
             stmts: statements,
-            tail,
             span: open_brace.extend_to(close_span),
         })
     }
 
-    fn parse_attribute(&mut self) -> Option<Attr> {
+    fn parse_attribute(&mut self) -> PResult<Option<Attr>> {
         if !self.eat(TokenKind::Hash) {
-            return None;
+            return Ok(None);
         }
         let span = self
             .expect(
                 TokenKind::OpenBracket,
-                error("期待 `[`").with_span(self.current_token.span).build(),
+                error("期待 `[`").with_span(self.current_token.span),
             )?
             .span;
         let path = self.parse_path(PathStyle::Attr)?;
@@ -672,14 +810,14 @@ impl<'a> Parser<'a> {
         let span = span.extend_to(
             self.expect(
                 TokenKind::CloseBracket,
-                error("期待 `]`").with_span(self.current_token.span).build(),
+                error("期待 `]`").with_span(self.current_token.span),
             )?
             .span,
         );
-        Some(Attr {
+        Ok(Some(Attr {
             path: path,
             arg: arg,
             span,
-        })
+        }))
     }
 }
