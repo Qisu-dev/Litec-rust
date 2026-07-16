@@ -1,6 +1,8 @@
-use index_vec::IndexVec;
 use litec_ast::ast::{self, Ident, NodeId};
-use litec_hir::{def::Res, hir};
+use litec_hir::{
+    def::Res,
+    hir::{self, TraitItemKind},
+};
 use litec_middle::context::TyCtxt;
 use litec_span::id::{HirId, ItemLocalId, OwnerId};
 use rustc_hash::FxHashMap;
@@ -121,13 +123,13 @@ impl<'hir> AstLowering<'hir> {
             }
         };
 
-        let item = self.tcx.alloc(hir::Item {
+        let item = self.tcx.alloc(hir::Item::new(
             hir_id,
-            def_id: def_id.to_def_id(),
-            visibility: item.visibility,
-            kind: item_kind,
-            span: item.span,
-        });
+            def_id.to_def_id(),
+            item.visibility,
+            item.span,
+            item_kind,
+        ));
         let node = hir::Node::Item(item);
         self.record_node(node);
 
@@ -199,14 +201,18 @@ impl<'hir> AstLowering<'hir> {
     }
 
     fn lower_trait_item(&mut self, ast_item: &ast::TraitItem) -> &'hir hir::TraitItem<'hir> {
+        let hir_id = self.next_hir_id_for_node(ast_item.node_id);
+        let def_id = self.tcx.def_id_of(ast_item.node_id).unwrap().to_def_id();
         match &ast_item.kind {
             ast::TraitItemKind::Fn(fn_) => {
                 let sig = self.lower_fn_sig(fn_);
-                self.tcx.alloc(hir::TraitItem::Fn(sig))
-            }
-            ast::TraitItemKind::Type(type_alias) => {
-                let type_alias = self.lower_type_alias(type_alias);
-                self.tcx.alloc(hir::TraitItem::TypeAlias(type_alias))
+                self.tcx.alloc(hir::TraitItem::new(
+                    hir_id,
+                    def_id,
+                    ast::Visibility::Public,
+                    ast_item.span,
+                    TraitItemKind::Fn(sig),
+                ))
             }
         }
     }
@@ -221,7 +227,8 @@ impl<'hir> AstLowering<'hir> {
         let mut items = Vec::new();
         for ast_item in &ast_impl.items {
             let item = self.lower_impl_item(ast_item);
-            items.push(item);
+            let def_id = self.tcx.def_id_of(ast_item.node_id).unwrap().to_def_id();
+            items.push((def_id, item));
         }
         let items_slice = self.tcx.alloc_slice_copy(&items);
 
@@ -233,17 +240,11 @@ impl<'hir> AstLowering<'hir> {
         })
     }
 
-    fn lower_impl_item(&mut self, ast_item: &ast::ImplItem) -> &'hir hir::ImplItem<'hir> {
+    fn lower_impl_item(&mut self, ast_item: &ast::ImplItem) -> &'hir hir::ImplItemKind<'hir> {
         match &ast_item.kind {
             ast::ImplItemKind::Fn(fn_) => {
                 let fn_node = self.lower_fn(fn_, ast_item.node_id);
-                self.tcx.alloc(hir::ImplItem::Fn(fn_node))
-            }
-            ast::ImplItemKind::Type(ty) => {
-                let generics = self.lower_generics(&ty.generics);
-                let ty_node = self.lower_ty(&ty.ty);
-                self.tcx
-                    .alloc(hir::ImplItem::TypeAlias(ty.name, generics, ty_node))
+                self.tcx.alloc(hir::ImplItemKind::Fn(fn_node))
             }
         }
     }
@@ -1059,7 +1060,6 @@ mod tests {
                         assert_eq!(fields.len(), 2);
                         let field0 = &fields[0];
                         assert_eq!(field0.name.to_string(), "x");
-                        // 字段类型为 i32，应表现为 Path 或 QPath
                         match field0.ty.kind {
                             TyKind::QPath(_) => {}
                             _ => panic!("field type should be QPath"),

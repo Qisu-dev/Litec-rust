@@ -100,6 +100,7 @@ pub enum BuiltinTrait {
     Rem,
     Neg,
     Not,
+    Deref,
     Clone,
     Copy,
     Default,

@@ -1,8 +1,9 @@
+use std::marker::PhantomData;
+
 use crate::def::Res;
-use index_vec::IndexVec;
 use litec_ast::ast::{AssignOp, BinOp, Ident, Lit, Mutability, RangeLimits, UnOp, Visibility};
 use litec_span::Span;
-use litec_span::id::{DefId, HirId, ItemLocalId, OwnerId};
+use litec_span::id::{DefId, HirId, OwnerId};
 
 #[derive(Debug, Clone)]
 pub struct Crate<'hir> {
@@ -16,7 +17,6 @@ pub struct PathSegment<'hir> {
     pub span: Span,
 }
 
-/// 解析后的完整路径。
 #[derive(Debug, Clone)]
 pub struct Path<'hir, R = Res> {
     pub res: R,
@@ -171,6 +171,15 @@ pub enum PrimTy {
     Float(FloatTy),
     Bool,
     Char,
+    Str,
+    Unit,
+    Never,
+}
+
+impl PrimTy {
+    pub fn is_numeric(&self) -> bool {
+        matches!(self, PrimTy::Int(_) | PrimTy::Uint(_) | PrimTy::Float(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -195,20 +204,32 @@ pub enum UintTy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FloatTy {
-    F16,
     F32,
     F64,
-    F128,
 }
 
 /// 项节点。
 #[derive(Debug, Clone)]
-pub struct Item<'hir> {
+pub struct Item<'hir, K = ItemKind<'hir>> {
     pub hir_id: HirId,
     pub def_id: DefId,
     pub visibility: Visibility,
     pub span: Span,
-    pub kind: ItemKind<'hir>,
+    pub kind: K,
+    _marker: PhantomData<&'hir ()>,
+}
+
+impl<'hir, K> Item<'hir, K> {
+    pub fn new(hir_id: HirId, def_id: DefId, visibility: Visibility, span: Span, kind: K) -> Self {
+        Self {
+            hir_id,
+            def_id,
+            visibility,
+            span,
+            kind,
+            _marker: PhantomData,
+        }
+    }
 }
 
 /// 项种类。
@@ -222,7 +243,7 @@ pub enum ItemKind<'hir> {
     Impl(&'hir Impl<'hir>),
     Trait(Ident, &'hir Generics<'hir>, &'hir [&'hir TraitItem<'hir>]),
     TypeAlias(&'hir TypeAlias<'hir>),
-    Enum(Ident, &'hir Generics<'hir>, &'hir [&'hir Variant<'hir>])
+    Enum(Ident, &'hir Generics<'hir>, &'hir [&'hir Variant<'hir>]),
 }
 
 #[derive(Debug, Clone)]
@@ -250,21 +271,22 @@ pub struct TypeAlias<'hir> {
 }
 
 #[derive(Debug, Clone)]
-pub enum TraitItem<'hir> {
+pub enum TraitItemKind<'hir> {
     Fn(&'hir FnSig<'hir>),
-    TypeAlias(&'hir TypeAlias<'hir>),
 }
+
+pub type TraitItem<'hir> = Item<'hir, TraitItemKind<'hir>>;
 
 #[derive(Debug, Clone)]
 pub struct Impl<'hir> {
     pub generics: &'hir Generics<'hir>,
     pub of_trait: Option<&'hir Path<'hir>>,
     pub self_ty: &'hir Ty<'hir>,
-    pub items: &'hir [&'hir ImplItem<'hir>],
+    pub items: &'hir [(DefId, &'hir ImplItemKind<'hir>)],
 }
 
 #[derive(Debug, Clone)]
-pub enum ImplItem<'hir> {
+pub enum ImplItemKind<'hir> {
     Fn(&'hir Fn<'hir>),
     TypeAlias(Ident, &'hir Generics<'hir>, &'hir Ty<'hir>),
 }

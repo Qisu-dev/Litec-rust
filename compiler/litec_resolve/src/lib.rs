@@ -856,6 +856,7 @@ impl<'a> Resolver<'a> {
             ("f64", Float(FloatTy::F64)),
             ("bool", Bool),
             ("char", Char),
+            ("str", Str)
         ];
 
         for (name, prim) in symbols {

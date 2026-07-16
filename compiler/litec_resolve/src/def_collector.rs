@@ -229,14 +229,6 @@ impl<'a, 'tcx> Visitor for DefCollector<'a, 'tcx> {
                     Visibility::Public,
                 );
             }
-            TraitItemKind::Type(type_alias) => {
-                self.allocate_def(
-                    trait_item.node_id,
-                    DefKind::TyAlias,
-                    type_alias.name,
-                    Visibility::Public,
-                );
-            }
         }
     }
 
@@ -266,14 +258,6 @@ impl<'a, 'tcx> Visitor for DefCollector<'a, 'tcx> {
                     impl_item.node_id,
                     DefKind::ImplFn,
                     fn_.sig.name,
-                    impl_item.visibility,
-                );
-            }
-            ImplItemKind::Type(ty) => {
-                self.allocate_def(
-                    impl_item.node_id,
-                    DefKind::ImplTy,
-                    ty.name,
                     impl_item.visibility,
                 );
             }

@@ -106,7 +106,6 @@ pub type TraitItem = Item<TraitItemKind>;
 #[derive(Debug, Clone)]
 pub enum TraitItemKind {
     Fn(FnSig),
-    Type(TypeAlias),
 }
 
 #[derive(Debug, Clone)]
@@ -124,7 +123,6 @@ pub type ImplItem = Item<ImplItemKind>;
 #[derive(Debug, Clone)]
 pub enum ImplItemKind {
     Fn(Fn),          // 方法定义
-    Type(TypeAlias), // 关联类型（trait 实现中）
 }
 
 #[derive(Debug, Clone)]

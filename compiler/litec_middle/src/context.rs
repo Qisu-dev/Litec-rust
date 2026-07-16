@@ -3,10 +3,10 @@ use litec_ast::ast::{Ident, NodeId, Visibility};
 use litec_error::{Diag, ErrorGuaranteed};
 use litec_hir::{
     adt::EnumVariantInfo,
-    def::{BuiltinTrait, DefKind, Res},
+    def::{DefKind, Res},
     def_data::DefData,
     def_path::DefPathHash,
-    def_table::{DefTable, StableCrateId}, hir::{FloatTy, IntTy, PrimTy, UintTy},
+    def_table::{DefTable, StableCrateId},
 };
 use litec_session::Session;
 use litec_span::{
@@ -16,7 +16,10 @@ use litec_span::{
 use rustc_hash::FxHashMap;
 use std::ops::Deref;
 
-use crate::resolve_output::{PartialPath, ResolveOutput};
+use crate::{
+    resolve_output::{PartialPath, ResolveOutput},
+    ty::Ty,
+};
 
 #[derive(Debug, Clone)]
 pub struct GlobalCtxt<'tcx> {
@@ -27,6 +30,7 @@ pub struct GlobalCtxt<'tcx> {
     pub(crate) ctor_map: FxHashMap<DefId, DefId>,
     pub(crate) enum_variant_map: FxHashMap<DefId, &'tcx [EnumVariantInfo]>,
     pub(crate) resolve_output: Option<ResolveOutput>,
+    pub(crate) function_signatures: FxHashMap<DefId, (Vec<Ty>, Ty)>,
 }
 
 impl<'tcx> GlobalCtxt<'tcx> {
@@ -39,6 +43,7 @@ impl<'tcx> GlobalCtxt<'tcx> {
             ctor_map: FxHashMap::default(),
             enum_variant_map: FxHashMap::default(),
             resolve_output: None,
+            function_signatures: FxHashMap::default(),
         }
     }
 
@@ -167,6 +172,14 @@ impl<'tcx> GlobalCtxt<'tcx> {
         self.resolve_output
             .as_ref()
             .expect("resolve_output 未被设置")
+    }
+
+    pub fn store_fn_sig(&mut self, def_id: DefId, sig: (Vec<Ty>, Ty)) {
+        self.function_signatures.insert(def_id, sig);
+    }
+
+    pub fn fn_sig(&self, def_id: DefId) -> Option<&(Vec<Ty>, Ty)> {
+        self.function_signatures.get(&def_id)
     }
 }
 

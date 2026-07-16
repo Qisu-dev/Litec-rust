@@ -22,3 +22,5 @@ target
 .vscode
 .cargo
 Cargo.lock
+
+.jj

@@ -31,6 +31,7 @@ members = [
     "compiler/litec_middle",
     "compiler/litec_resolve",
     "compiler/litec_session",
+    "compiler/litec_typeck",
 ]
 
 [workspace.dependencies]

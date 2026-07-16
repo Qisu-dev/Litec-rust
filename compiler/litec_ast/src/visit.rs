@@ -399,7 +399,6 @@ pub fn walk_impl<V: Visitor + ?Sized>(visitor: &mut V, impl_: &Impl) {
 pub fn walk_impl_item<V: Visitor + ?Sized>(visitor: &mut V, impl_item: &ImplItem) {
     match &impl_item.kind {
         ImplItemKind::Fn(fn_) => visitor.visit_fn(fn_),
-        ImplItemKind::Type(type_alias) => visitor.visit_type_alias(type_alias),
     }
 }
 
@@ -411,7 +410,6 @@ pub fn walk_type_alias<V: Visitor + ?Sized>(visitor: &mut V, type_alias: &TypeAl
 pub fn walk_trait_item<V: Visitor + ?Sized>(visitor: &mut V, trait_item: &TraitItem) {
     match &trait_item.kind {
         TraitItemKind::Fn(fn_) => visitor.visit_fn_sig(fn_),
-        TraitItemKind::Type(ty_alias) => visitor.visit_type_alias(ty_alias),
     }
 }
 

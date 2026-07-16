@@ -349,6 +349,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "litec_typeck"
+version = "0.1.0"
+dependencies = [
+ "litec_ast",
+ "litec_error",
+ "litec_hir",
+ "litec_middle",
+ "litec_span",
+ "rustc-hash",
+]
+
+[[package]]
 name = "llvm-sys"
 version = "181.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

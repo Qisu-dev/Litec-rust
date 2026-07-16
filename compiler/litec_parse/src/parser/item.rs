@@ -323,11 +323,6 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::Semi, self.span_error("期待 `;`"))?;
                 TraitItemKind::Fn(sig)
             }
-            TokenKind::Type => {
-                let type_alias = self.parse_type_alias()?;
-                self.expect(TokenKind::Semi, self.span_error("期待 `;`"))?;
-                TraitItemKind::Type(type_alias)
-            }
             _ => {
                 return Err(self.error(self.span_error("未知 token")));
             }
@@ -372,16 +367,7 @@ impl<'a> Parser<'a> {
         {
             let impl_item = self.parse_impl_item()?;
 
-            if of_trait.is_some() {
-                items.push(impl_item);
-            } else {
-                if let ImplItemKind::Type(_) = impl_item.kind {
-                    return Err(
-                        self.error(error("在固定实现内不可以有类型别名").with_span(impl_item.span))
-                    );
-                }
-                items.push(impl_item);
-            }
+            items.push(impl_item);
         }
 
         self.expect(
@@ -402,7 +388,6 @@ impl<'a> Parser<'a> {
         let item = self.parse_item()?;
         let impl_kind = match item.kind {
             ItemKind::Fn(fn_) => ImplItemKind::Fn(fn_),
-            ItemKind::TypeAlias(type_alias) => ImplItemKind::Type(type_alias),
             _ => {
                 return Err(self.error(error("impl内部仅能有函数与类型别名").with_span(item.span)));
             }
